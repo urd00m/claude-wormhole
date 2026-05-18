@@ -32,49 +32,36 @@ export function isSpawnTool(name: string): boolean {
 }
 
 /**
- * Tool allowlist for sub-agents we spawn via our `general-purpose` override.
+ * Tools sub-agents must NOT have. Used as `disallowedTools` on each agent
+ * definition; `tools` is intentionally omitted so the sub-agent INHERITS
+ * the parent's full preset surface (which includes Bash, Agent, Task,
+ * Read/Write/Edit, web tools, etc.).
  *
- * Important: we list tools explicitly rather than relying on the SDK's
- * "omit tools to inherit from parent" semantic. In practice the SDK's
- * built-in default for `general-purpose` excludes `Bash` and `Agent` as a
- * safety measure, and our override only takes effect for fields we name.
- * Listing them here is what actually grants them to sub-agents.
+ * Why this design (and not an explicit allowlist):
+ *   AgentDefinition.tools only accepts string[] — there is no `{ type:
+ *   'preset', preset: 'claude_code' }` form for sub-agents like the
+ *   top-level Options.tools has. Setting an explicit list means EVERY
+ *   tool we want the sub-agent to have must appear under the exact name
+ *   the CLI uses internally for matching. In practice that's brittle:
+ *   the spawning tool has alternate names ("Agent" vs "Task") in the
+ *   binary, and a missed entry silently strips a critical capability.
  *
- * Includes:
- *   - File / shell / search tools — the canonical Claude Code surface.
- *   - `Agent` — so sub-agents can spawn further sub-agents (bounded by
- *     MAX_SUBAGENT_DEPTH; enforced in canUseTool).
- *   - Read-only MCP tools (`get_workdir`, `cron_list`).
- *   - Slack-post MCP tools (sub-agents can post status / files back).
+ *   Per the SDK doc on AgentDefinition.tools: "If omitted, inherits all
+ *   tools from parent." Omitting `tools` and using `disallowedTools` to
+ *   subtract a small known set gives sub-agents the full inherited
+ *   surface with surgical exclusions — no name-match surprises.
  *
- * Deliberately omitted:
- *   - `mcp__workdir__set_workdir` / `reset_workdir` — sub-agents must not
- *     mutate the parent thread's workdir.
- *   - `mcp__cron__cron_add` / `cron_remove` — sub-agents must not persist
- *     schedules without an explicit user ask.
+ * Excluded:
+ *   - set_workdir / reset_workdir — a sub-agent must not hijack the
+ *     parent thread's cwd. Read access (`get_workdir`) is fine.
+ *   - cron_add / cron_remove — a sub-agent must not persist schedules
+ *     without an explicit user request. Read (`cron_list`) is fine.
  */
-export const SUBAGENT_TOOL_ALLOWLIST: readonly string[] = [
-  "Bash",
-  "Read",
-  "Write",
-  "Edit",
-  "Grep",
-  "Glob",
-  "WebFetch",
-  "WebSearch",
-  "NotebookEdit",
-  "NotebookRead",
-  "TodoWrite",
-  // Both names for the sub-agent-spawning tool. The CLI binary contains
-  // both strings as alternate identifiers; matching only one of them leaves
-  // sub-agents without the ability to spawn further workers depending on
-  // which name the CLI uses internally for allowlist matching. List both.
-  "Agent",
-  "Task",
-  "mcp__slack__slack_post_message",
-  "mcp__slack__slack_post_file",
-  "mcp__workdir__get_workdir",
-  "mcp__cron__cron_list",
+export const SUBAGENT_DISALLOWED_TOOLS: readonly string[] = [
+  "mcp__workdir__set_workdir",
+  "mcp__workdir__reset_workdir",
+  "mcp__cron__cron_add",
+  "mcp__cron__cron_remove",
 ];
 
 /**

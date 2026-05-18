@@ -6,7 +6,7 @@ import {
   isSpawnTool,
   MAX_SUBAGENT_DEPTH,
   rewriteSpawnInput,
-  SUBAGENT_TOOL_ALLOWLIST,
+  SUBAGENT_DISALLOWED_TOOLS,
 } from "./subagentDepth.js";
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -19,32 +19,34 @@ assert(isSpawnTool("Task"), "Task must be recognized as spawn tool (legacy)");
 assert(!isSpawnTool("Bash"), "Bash is not a spawn tool");
 assert(!isSpawnTool("agent"), "spawn-tool match is case-sensitive");
 
-// Sub-agent allowlist must include Bash and the spawning tool, or the
-// orchestrator → planner → verifier patterns fail at runtime.
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("Bash"), "sub-agents must have Bash");
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("Agent"), "sub-agents must have Agent (for nested spawn)");
+// Sub-agent disallowed list: ONLY parent-state mutators may appear here.
+// Critically, neither Bash nor the spawn tool (Agent/Task) may be on this
+// list — sub-agents need both to run repo tooling and to spawn workers
+// (Planner / Plan-critic / Executor / Analyzer / Verifier / Verdict-critic).
 assert(
-  SUBAGENT_TOOL_ALLOWLIST.includes("Task"),
-  "sub-agents must have Task (CLI alternate spawn name; the binary contains both strings)",
-);
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("NotebookRead"), "sub-agents need NotebookRead");
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("Read"), "sub-agents must have Read");
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("Write"), "sub-agents must have Write");
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("Edit"), "sub-agents must have Edit");
-assert(SUBAGENT_TOOL_ALLOWLIST.includes("WebFetch"), "sub-agents must have WebFetch");
-assert(
-  SUBAGENT_TOOL_ALLOWLIST.includes("mcp__slack__slack_post_message"),
-  "sub-agents must be able to post to Slack",
-);
-// Parent-state mutators stay out.
-assert(
-  !SUBAGENT_TOOL_ALLOWLIST.includes("mcp__workdir__set_workdir"),
-  "sub-agents must NOT have set_workdir",
+  !SUBAGENT_DISALLOWED_TOOLS.includes("Bash"),
+  "Bash must NOT be in disallowed list — sub-agents need it for repo tooling",
 );
 assert(
-  !SUBAGENT_TOOL_ALLOWLIST.includes("mcp__cron__cron_add"),
-  "sub-agents must NOT have cron_add",
+  !SUBAGENT_DISALLOWED_TOOLS.includes("Agent"),
+  "Agent must NOT be in disallowed list — needed for nested spawn (validation criteria 3/6/7/8)",
 );
+assert(
+  !SUBAGENT_DISALLOWED_TOOLS.includes("Task"),
+  "Task (alt spawn name) must NOT be in disallowed list",
+);
+for (const t of ["Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookRead", "NotebookEdit", "TodoWrite"]) {
+  assert(!SUBAGENT_DISALLOWED_TOOLS.includes(t), `${t} must NOT be disallowed for sub-agents`);
+}
+// Parent-state mutators MUST be in the disallowed list.
+for (const t of [
+  "mcp__workdir__set_workdir",
+  "mcp__workdir__reset_workdir",
+  "mcp__cron__cron_add",
+  "mcp__cron__cron_remove",
+]) {
+  assert(SUBAGENT_DISALLOWED_TOOLS.includes(t), `${t} must be in disallowed list (sub-agent isolation)`);
+}
 
 // Depth math: chain from main → cap, with both Agent and Task as spawn names.
 const depths = new Map<string, number>();
@@ -146,5 +148,5 @@ assert(gate("Bash", "T_over", depths) === "allow", "non-spawn tool ignores depth
 }
 
 console.log(
-  `✅ subagent depth cap verified (MAX=${MAX_SUBAGENT_DEPTH}, allowlist size=${SUBAGENT_TOOL_ALLOWLIST.length})`,
+  `✅ subagent depth cap verified (MAX=${MAX_SUBAGENT_DEPTH}, disallowed size=${SUBAGENT_DISALLOWED_TOOLS.length})`,
 );
