@@ -36,7 +36,18 @@ check_var() {
 check_var SLACK_APP_TOKEN "xapp-"
 check_var SLACK_BOT_TOKEN "xoxb-"
 check_var SLACK_SIGNING_SECRET ""
-check_var ANTHROPIC_API_KEY ""
+
+# Claude auth: either ANTHROPIC_API_KEY or an OAuth credentials file is required.
+CREDS_PRIMARY="$HOME/.claude/.credentials.json"
+CREDS_ALT="$HOME/.claude/credentials.json"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ok "Claude auth: ANTHROPIC_API_KEY set"
+elif [ -f "$CREDS_PRIMARY" ] || [ -f "$CREDS_ALT" ]; then
+  ok "Claude auth: subscription OAuth credentials present (~/.claude/)"
+else
+  err "Claude auth: neither ANTHROPIC_API_KEY nor ~/.claude/.credentials.json found — run 'npm run login' or set the env var"
+  FAIL=1
+fi
 
 step "Type-check"
 if npx tsc --noEmit; then ok "clean"; else err "type errors"; FAIL=1; fi

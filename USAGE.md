@@ -199,15 +199,28 @@ You don't call these directly — the agent decides when to use them. If you wan
 
 ---
 
+## Billing — API key vs subscription
+
+How usage gets billed depends on which auth path you picked at setup:
+
+- **Subscription** (you ran `npm run login`): turns count against your Claude Pro or Claude Max subscription's quota. No per-token charges. Hitting the daily/weekly cap will surface as a `rate_limit` error in the thread until the quota resets.
+- **API key** (`ANTHROPIC_API_KEY` in `.env`): every turn is billed at standard API token rates against the key's organization. Long threads or sub-agent fan-out can add up quickly — keep an eye on the console at <https://console.anthropic.com/>.
+
+To switch between them: edit `.env` (or run `npm run logout` / `npm run login`), then restart `npm run dev`. The startup banner shows which mode is active.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
 | No `:eyes:` reaction | Bot isn't running, or isn't invited to that channel. Check the terminal. |
 | `:eyes:` but no reply | Anthropic API error — check the terminal logs. Bot will post `:warning: agent error: …` if it can. |
+| `❌ No Claude auth configured` at startup | Run `npm run login` (subscription) or set `ANTHROPIC_API_KEY` in `.env` (API key). |
+| `authentication_failed` / `oauth_org_not_allowed` | OAuth creds expired or wrong account — `npm run logout` then `npm run login` again. |
 | `not_in_channel` errors | Bot needs `/invite @YourBotName` in that channel. |
 | `missing_scope` errors | Re-create the app from `slack-manifest.yaml` or add the missing scope by hand, then reinstall. |
 | Heartbeat keeps adding emoji forever | Agent is hung; restart `npm run dev`. The session for that thread will reset. |
 | Bot replies to its own messages | It shouldn't — the handler filters `bot_id`. If you see this, file a bug. |
 
-For deeper issues, run `./scripts/doctor.sh` to confirm env + typecheck + tests all pass.
+For deeper issues, run `./scripts/doctor.sh` to confirm env + auth + typecheck + tests all pass.

@@ -30,12 +30,16 @@ cd slack-claude-agent
 ./scripts/setup.sh           # checks Node 20+, installs deps, copies .env, runs tests
 
 # 2. Create the Slack app  (see "Slack app setup" below)
-#    Fill the four tokens into .env
+#    Fill the three Slack tokens into .env
 
-# 3. Sanity check
-./scripts/doctor.sh          # validates .env and re-runs the test suite
+# 3. Authenticate to Claude  (pick one)
+npm run login                # OAuth into your Claude Pro/Max subscription, OR
+# …set ANTHROPIC_API_KEY in .env to use a pay-as-you-go API key instead
 
-# 4. Run
+# 4. Sanity check
+./scripts/doctor.sh          # validates .env + auth and re-runs the test suite
+
+# 5. Run
 npm run dev
 ```
 
@@ -64,16 +68,15 @@ The fast path uses the **Slack app manifest** included in this repo (`slack-mani
 2. Pick the workspace you want to install into.
 3. Open `slack-manifest.yaml` in this repo, paste it into the YAML tab, click **Next** → **Create**.
 
-### 2. Generate the four tokens
+### 2. Generate the Slack tokens
 
-You need four values in `.env`:
+You need three Slack values in `.env`. (Claude auth is separate — see the "Claude authentication" section above.)
 
 | Env var | Where to find it |
 |---|---|
 | `SLACK_APP_TOKEN` (`xapp-…`) | **Basic Information → App-Level Tokens → Generate Token and Scopes** → add `connections:write` scope → copy the token |
 | `SLACK_SIGNING_SECRET` | **Basic Information → App Credentials → Signing Secret** |
 | `SLACK_BOT_TOKEN` (`xoxb-…`) | **OAuth & Permissions → Install to Workspace → Allow** → copy the Bot User OAuth Token shown after install |
-| `ANTHROPIC_API_KEY` (`sk-ant-…`) | <https://console.anthropic.com/settings/keys> |
 
 ### 3. Invite the bot
 
@@ -105,6 +108,8 @@ If you'd rather configure by hand, the manifest is the authoritative list — ev
 ```bash
 npm run dev         # start with watch reload
 npm run start       # start without watch
+npm run login       # OAuth into your Claude subscription
+npm run logout      # clear Claude credentials
 npm run typecheck   # strict TS check
 npm run test        # run verification suite (no live tokens needed)
 npm run build       # compile to dist/

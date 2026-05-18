@@ -8,6 +8,8 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
+    "login": "bash scripts/login.sh",
+    "logout": "npx -y @anthropic-ai/claude-code logout",
     "test": "SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/agent/guards.test.ts && SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/slack/heartbeat.test.ts && SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/agent/manager.test.ts && SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/slack/stream.test.ts && SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/slack/download.test.ts && SLACK_APP_TOKEN=xapp-stub SLACK_BOT_TOKEN=xoxb-stub SLACK_SIGNING_SECRET=stub ANTHROPIC_API_KEY=stub tsx src/slack/consent.test.ts"
   },
   "dependencies": {

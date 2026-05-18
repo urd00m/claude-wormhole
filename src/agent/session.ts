@@ -61,7 +61,7 @@ export class Session {
         continue: this.hasStarted,
         canUseTool: this.canUseTool,
         mcpServers: this.mcpServers,
-        env: { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY } as Record<string, string>,
+        env: buildChildEnv(),
       },
     });
 
@@ -122,6 +122,25 @@ export class Session {
     this.hasStarted = true;
     return { finalText: finalText || "_(no response)_" };
   }
+}
+
+/**
+ * Build the env passed to the Claude Code subprocess. If ANTHROPIC_API_KEY is
+ * set, use it. If not, omit the var entirely so the subprocess falls back to
+ * OAuth credentials at ~/.claude/ (i.e., a Claude Pro/Max subscription).
+ */
+function buildChildEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  if (env.ANTHROPIC_API_KEY) {
+    out.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
+  } else {
+    // Make sure no stale value leaks in from process.env if it was empty-string
+    delete out.ANTHROPIC_API_KEY;
+  }
+  return out;
 }
 
 function buildPrompt(input: SessionInput): string {
