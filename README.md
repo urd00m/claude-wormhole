@@ -1,84 +1,125 @@
 # slack-claude-agent
 
-A Slack bot that **is** a Claude agent. Every message becomes a turn in a per-thread Claude Agent SDK session with full tool access (Bash, file ops, web fetch, web search, sub-agent spawning via `Task`).
+A Slack bot that **is** a Claude agent. Every Slack thread becomes its own Claude Code session — with file system access, Bash, web search, PDF reading, diagram rendering, and the ability to launch sub-agents — all driven by chatting in Slack.
 
-## Features
+Think of it as Claude Code in your DMs.
 
-- **Per-thread sessions** — each Slack thread is an isolated agent session with its own working directory under `sessions/<channel>:<thread_ts>/`.
-- **Reaction heartbeat** — `:eyes:` immediately on receipt, a new rotating emoji every 30 seconds while processing. On completion: all heartbeat reactions are removed and replaced with `:+1:` (success) or `:x:` (error).
-- **Streaming replies** — agent output streams into a single Slack message, throttled to ≤1 edit/sec. Tool calls show inline as `_🔧 Bash…_` → `_✅ Bash_`.
-- **Consent gate** — destructive Bash commands (`rm`, `git reset --hard`, force-push, `dd`, truncation via `>`, etc.) are paused and require user approval via interactive buttons (or a `yes`/`no` reply in the thread). 5-minute auto-deny timeout. Sub-agent calls hit the same gate.
-- **File ingest** — PDFs, images, and other uploads are downloaded into the session workdir and made available to the agent via the standard `Read` tool.
-- **Diagram rendering** — agent can generate Mermaid source and render with `mmdc` via Bash, then upload the PNG back through the custom `slack_post_file` MCP tool.
-- **Sub-agents** — the SDK's `Task` tool is enabled; the agent can launch sub-agents for parallel or context-isolated work.
+> For day-to-day usage (how threads map to sessions, what commands need consent, attaching files, asking for diagrams, etc.) see **[USAGE.md](./USAGE.md)**.
 
-## Setup
+---
 
-### 1. Create a Slack app
+## What this repo gives you
 
-Go to https://api.slack.com/apps → "Create New App" → "From scratch". Then:
+- A Node/TypeScript app that runs on your laptop and connects to Slack over **Socket Mode** (no public URL required).
+- **Per-thread Claude agent sessions** — open a new thread to start a new conversation; reply in an existing thread to continue it.
+- **Reaction heartbeat** — `:eyes:` the instant the bot reads your message, a new emoji every 30 seconds while it works, all replaced with `:+1:` (or `:x:`) when done.
+- **Live streaming replies** — the bot's response edits into Slack as it writes, with inline `_🔧 Bash…_` / `_✅ Bash_` indicators for each tool call.
+- **Consent gate** — destructive commands (`rm`, `git reset --hard`, force-push, `dd`, file truncation, etc.) pause and ask for an Approve/Deny button click before running. Sub-agents go through the same gate.
+- **File ingest** — drop a PDF, image, or any file into the Slack thread; the bot reads it.
+- **File output** — agent can post images/PDFs/diagrams back into the thread.
+- **Sub-agents** — the agent can spawn sub-agents (via the SDK's `Task` tool) for parallel or context-isolated work.
 
-**Socket Mode** → On → generate an app-level token with `connections:write` (this is your `SLACK_APP_TOKEN`, starts with `xapp-`).
+---
 
-**OAuth & Permissions → Bot Token Scopes:**
-
-- `app_mentions:read`
-- `channels:history` (for public channels)
-- `chat:write`
-- `groups:history` (for private channels)
-- `im:history`
-- `im:read`
-- `im:write`
-- `mpim:history`
-- `reactions:read`
-- `reactions:write`
-- `files:read`
-- `files:write`
-
-**Event Subscriptions** → On. Subscribe to bot events:
-
-- `app_mention`
-- `message.channels`
-- `message.groups`
-- `message.im`
-- `message.mpim`
-
-**Interactivity & Shortcuts** → On. (Socket Mode delivers payloads — no Request URL needed.)
-
-**Install to Workspace** → grab the **Bot User OAuth Token** (`xoxb-…`) and the **Signing Secret** from "Basic Information".
-
-### 2. Configure
+## Quick start
 
 ```bash
-cp .env.example .env
-# fill in SLACK_APP_TOKEN, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ANTHROPIC_API_KEY
-```
+# 1. Clone & set up
+git clone <this-repo> slack-claude-agent
+cd slack-claude-agent
+./scripts/setup.sh           # checks Node 20+, installs deps, copies .env, runs tests
 
-### 3. Install & run
+# 2. Create the Slack app  (see "Slack app setup" below)
+#    Fill the four tokens into .env
 
-```bash
-npm install
+# 3. Sanity check
+./scripts/doctor.sh          # validates .env and re-runs the test suite
+
+# 4. Run
 npm run dev
 ```
 
 You should see `⚡️ Bolt app running`. DM the bot or invite it to a channel and start chatting.
 
+---
+
+## Setup scripts
+
+| Script | What it does |
+|---|---|
+| `./scripts/setup.sh` | Verifies Node 20+, runs `npm install`, copies `.env.example → .env` (if missing), runs `tsc --noEmit`, runs the verification suite. Use this once after cloning. |
+| `./scripts/doctor.sh` | Checks all four env vars are filled with correctly-prefixed tokens, re-runs typecheck and tests. Use this after editing `.env` or whenever something feels off. |
+
+If you'd rather do it manually: `npm install && cp .env.example .env && npm run typecheck && npm run test`.
+
+---
+
+## Slack app setup
+
+The fast path uses the **Slack app manifest** included in this repo (`slack-manifest.yaml`). It pre-configures every scope, event subscription, Socket Mode toggle, and interactivity setting in one paste.
+
+### 1. Create the app from the manifest
+
+1. Go to <https://api.slack.com/apps> → **Create New App** → **From a manifest**.
+2. Pick the workspace you want to install into.
+3. Open `slack-manifest.yaml` in this repo, paste it into the YAML tab, click **Next** → **Create**.
+
+### 2. Generate the four tokens
+
+You need four values in `.env`:
+
+| Env var | Where to find it |
+|---|---|
+| `SLACK_APP_TOKEN` (`xapp-…`) | **Basic Information → App-Level Tokens → Generate Token and Scopes** → add `connections:write` scope → copy the token |
+| `SLACK_SIGNING_SECRET` | **Basic Information → App Credentials → Signing Secret** |
+| `SLACK_BOT_TOKEN` (`xoxb-…`) | **OAuth & Permissions → Install to Workspace → Allow** → copy the Bot User OAuth Token shown after install |
+| `ANTHROPIC_API_KEY` (`sk-ant-…`) | <https://console.anthropic.com/settings/keys> |
+
+### 3. Invite the bot
+
+- **DM:** open Slack → search for the app name → message it directly. (DMs work as soon as install is done.)
+- **Channels:** `/invite @YourBotName` in any channel you want it to listen in.
+
+### 4. Run it
+
+```bash
+npm run dev
+```
+
+The bot will start receiving messages as soon as Socket Mode connects. Heading over to Slack and sending it a message should produce a `:eyes:` reaction within a second.
+
+### Manual app setup (without the manifest)
+
+If you'd rather configure by hand, the manifest is the authoritative list — every value you'd toggle in the app config UI is in `slack-manifest.yaml`. The non-obvious ones:
+
+- **Socket Mode** → On
+- **Interactivity** → On (no Request URL needed — Socket Mode delivers the payloads)
+- **App-Level Token scope:** `connections:write`
+- **Bot scopes:** `app_mentions:read`, `channels:history`, `chat:write`, `files:read`, `files:write`, `groups:history`, `im:history`, `im:read`, `im:write`, `mpim:history`, `reactions:read`, `reactions:write`
+- **Subscribed bot events:** `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`
+
+---
+
 ## Commands
 
-- `npm run dev` — start with watch reload
-- `npm run start` — start without watch
-- `npm run typecheck` — strict TS check
-- `npm run test` — run all verification scripts (no real Slack/API needed)
-- `npm run build` — compile to `dist/`
+```bash
+npm run dev         # start with watch reload
+npm run start       # start without watch
+npm run typecheck   # strict TS check
+npm run test        # run verification suite (no live tokens needed)
+npm run build       # compile to dist/
+```
 
-## Architecture
+---
+
+## Project layout
 
 ```
 src/
 ├── index.ts              # boot
-├── config.ts             # zod env validation
+├── config.ts             # zod-validated env
 ├── slack/
-│   ├── app.ts            # Bolt app construction (Socket Mode)
+│   ├── app.ts            # Bolt app (Socket Mode)
 │   ├── handlers.ts       # message + app_mention → SessionManager
 │   ├── heartbeat.ts      # rotating reactions every 30s
 │   ├── stream.ts         # throttled chat.update streaming
@@ -86,7 +127,7 @@ src/
 │   ├── download.ts       # ingest Slack file attachments
 │   ├── upload.ts         # files.uploadV2 wrapper
 │   ├── consent.ts        # destructive-command approval flow
-│   └── interactions.ts   # block_actions handler for approval buttons
+│   └── interactions.ts   # block_actions handler for buttons
 └── agent/
     ├── manager.ts        # Map<threadKey, Session> + per-thread queue
     ├── session.ts        # Agent SDK query() wrapper
@@ -94,27 +135,32 @@ src/
     ├── guards.ts         # destructive-command classifier
     ├── canUseTool.ts     # permission hook → consent flow
     └── tools/
-        └── slackPost.ts  # MCP server: slack_post_message, slack_post_file
+        └── slackPost.ts  # MCP tools: slack_post_message, slack_post_file
 ```
 
-See `TODO.md` for deferred features (multi-workspace, persistence, productionization).
+`scripts/`, `slack-manifest.yaml`, `.env.example`, and `TODO.md` (deferred features) live at the repo root.
 
-## Verification
+---
 
-The `test` script exercises six independent scenarios with stubbed Slack/Anthropic clients:
+## What's *not* in v1
 
-| Verification | What it checks |
-|---|---|
-| `guards.test.ts` | 17 destructive command patterns flagged; 10 safe patterns pass |
-| `heartbeat.test.ts` | `:eyes:` first, rotation, cleanup, final `:+1:` / `:x:` |
-| `manager.test.ts` | Same thread → same session; cross-thread runs in parallel; same-thread serializes |
-| `stream.test.ts` | One placeholder post, ≤1 edit/sec throttling, tool indicators render |
-| `download.test.ts` | Slack file download writes to workdir; path-traversal names sanitized |
-| `consent.test.ts` | Button approve, reply `no`, non-trigger replies don't consume pending prompts |
+See `TODO.md` for the deferred list. The big ones:
 
-End-to-end smoke tests against a live Slack workspace (Q&A, multi-turn, tool use, sub-agent, PDF upload, diagram, destructive consent) are listed in `TODO.md` under v1.
+- **Multi-workspace install** — single-workspace only for now (one set of tokens, no OAuth flow).
+- **Session persistence across restarts** — sessions are in-memory; restart loses the per-thread agent state (Slack messages stay, but the agent loses its context).
+- **Stronger sandboxing** — the agent runs Bash on your laptop, scoped to `sessions/<threadKey>/`. The consent gate catches the common destructive patterns but is not a sandbox. Docker-per-session is sketched in TODO.
+
+---
 
 ## Security notes
 
-- The bot runs **on your laptop** and executes arbitrary commands the LLM decides on, scoped to `sessions/<threadKey>/`. The consent gate catches the common destructive patterns but is not a sandbox.
-- For a hardened setup, see the "stronger sandboxing" TODO — running each session inside Docker is straightforward but not yet wired.
+- Treat this like running an SSH session that anyone in your Slack workspace can drive. The consent gate gives you a circuit breaker for the most destructive patterns, but it isn't a substitute for isolation.
+- Only invite the bot to channels where you're comfortable with that trust level. For most users, DM-only is the right setup.
+- Tokens in `.env` are gitignored. Don't commit them.
+
+---
+
+## See also
+
+- **[USAGE.md](./USAGE.md)** — how to actually use it once it's running.
+- **[TODO.md](./TODO.md)** — deferred features and known limitations.
