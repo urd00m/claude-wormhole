@@ -16,6 +16,7 @@ TESTS=(
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
+  src/slack/taskEvents.test.ts
   src/slack/download.test.ts
   src/slack/consent.test.ts
   src/scheduler/scheduler.test.ts

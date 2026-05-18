@@ -6,6 +6,7 @@ import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
+import { buildTaskEventPoster } from "../slack/taskEvents.js";
 import type { CronEntry } from "./store.js";
 import type { Scheduler } from "./scheduler.js";
 
@@ -64,6 +65,7 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
             onToolStart: (id, name) => streamer.toolStart(id, name),
             onToolEnd: (id, ok) => streamer.toolEnd(id, ok),
             onFinal: (text) => streamer.setText(text),
+            onTaskEvent: buildTaskEventPoster(client, entry.channel, threadTs),
           },
         );
         await streamer.finalize();

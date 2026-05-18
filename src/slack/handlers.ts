@@ -9,6 +9,7 @@ import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
+import { buildTaskEventPoster } from "./taskEvents.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -122,6 +123,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           // This is the authoritative response and works even if no token
           // deltas were emitted.
           onFinal: (text) => streamer.setText(text),
+          onTaskEvent: buildTaskEventPoster(client, msg.channel, replyThreadTs),
         },
       );
       await streamer.finalize();

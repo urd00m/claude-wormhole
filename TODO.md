@@ -42,6 +42,11 @@
 - [ ] Uninstall + revoke cleanup
 - [ ] Required scopes documented per workspace admin
 
+## Deferred — UX & alt-runtimes
+
+- [ ] **Codex support** — alternative model/runtime path so a thread can be backed by Codex (OpenAI) instead of Claude. Switching is per-thread (similar shape to per-thread workdir override). Needs: provider abstraction over `session.ts`, env vars for the Codex key, tool-surface translation (since Codex's tool calling differs), parity for the consent / heartbeat / streaming layer.
+- [ ] **Active-session reactions** — visual marker on Slack messages indicating which threads currently have an in-memory agent session (vs threads where the user would be starting fresh). Right now the user has to mentally track which threads are "alive." Sketch: when a thread's session is hot, the root message gets a persistent `:satellite:` (or similar) reaction; when the session is GC'd or the bot restarts, the reaction is removed. Should survive across the existing heartbeat lifecycle without interfering with it.
+
 ## Deferred — productionization
 
 - [ ] Session persistence across restarts (SQLite for thread → state map)
