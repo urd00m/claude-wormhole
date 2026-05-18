@@ -7,6 +7,7 @@ import { downloadFile, type SlackFileRef } from "./download.js";
 import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildWorkdirMcp } from "../agent/tools/workdir.js";
+import { buildSpawnMcp } from "../agent/tools/spawn.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
@@ -92,14 +93,28 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       }
 
       // Wire per-thread MCP servers + consent gate
+      const taskEventPoster = buildTaskEventPoster(client, msg.channel, replyThreadTs);
+      const slackCtx = {
+        client,
+        channel: msg.channel,
+        threadTs: replyThreadTs,
+        workdir: entry.session.workdir,
+      };
+      const canUseToolCtx = { client, channel: msg.channel, threadTs: replyThreadTs };
+
       const mcpServers: Record<string, ReturnType<typeof buildSlackMcp>> = {
-        slack: buildSlackMcp({
-          client,
-          channel: msg.channel,
-          threadTs: replyThreadTs,
-          workdir: entry.session.workdir,
-        }),
+        slack: buildSlackMcp(slackCtx),
         workdir: buildWorkdirMcp({ session: entry.session, threadKey: key }),
+        // spawn MCP — workaround for the CLI's hardcoded Agent/Task strip
+        // on sub-agents. Workers spawned via this tool get the full
+        // surface (including a recursive spawn MCP one level deeper).
+        spawn: buildSpawnMcp({
+          workdir: entry.session.workdir,
+          depth: 0,
+          buildSlackMcp: () => buildSlackMcp(slackCtx),
+          buildCanUseTool: () => buildCanUseTool(canUseToolCtx),
+          onTaskEvent: taskEventPoster,
+        }),
       };
       if (_scheduler) {
         mcpServers.cron = buildCronMcp({
@@ -109,9 +124,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         });
       }
       entry.session.setMcpServers(mcpServers);
-      entry.session.setCanUseTool(
-        buildCanUseTool({ client, channel: msg.channel, threadTs: replyThreadTs }),
-      );
+      entry.session.setCanUseTool(buildCanUseTool(canUseToolCtx));
 
       await entry.session.send(
         { text: msg.text, attachments },
@@ -123,7 +136,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           // This is the authoritative response and works even if no token
           // deltas were emitted.
           onFinal: (text) => streamer.setText(text),
-          onTaskEvent: buildTaskEventPoster(client, msg.channel, replyThreadTs),
+          onTaskEvent: taskEventPoster,
         },
       );
       await streamer.finalize();

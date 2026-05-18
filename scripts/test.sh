@@ -14,6 +14,7 @@ TESTS=(
   src/agent/canUseTool.test.ts
   src/agent/subagentDepth.test.ts
   src/agent/recursiveAgents.test.ts
+  src/agent/spawnMcp.test.ts
   src/agent/spawnFlow.test.ts
   src/agent/sessionStream.test.ts
   src/slack/heartbeat.test.ts

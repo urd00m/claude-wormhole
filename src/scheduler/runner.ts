@@ -6,6 +6,7 @@ import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
+import { buildSpawnMcp } from "../agent/tools/spawn.js";
 import { buildTaskEventPoster } from "../slack/taskEvents.js";
 import type { CronEntry } from "./store.js";
 import type { Scheduler } from "./scheduler.js";
@@ -40,23 +41,32 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
 
       let outcome: "success" | "error" = "success";
       try {
+        const slackCtx = {
+          client,
+          channel: entry.channel,
+          threadTs,
+          workdir: sessionEntry.session.workdir,
+        };
+        const canUseToolCtx = { client, channel: entry.channel, threadTs };
+        const taskEventPoster = buildTaskEventPoster(client, entry.channel, threadTs);
+
         sessionEntry.session.setMcpServers({
-          slack: buildSlackMcp({
-            client,
-            channel: entry.channel,
-            threadTs,
-            workdir: sessionEntry.session.workdir,
-          }),
+          slack: buildSlackMcp(slackCtx),
           cron: buildCronMcp({
             scheduler: getScheduler(),
             currentChannel: entry.channel,
             createdBy: `cron:${entry.id}`,
           }),
           workdir: buildWorkdirMcp({ session: sessionEntry.session, threadKey: key }),
+          spawn: buildSpawnMcp({
+            workdir: sessionEntry.session.workdir,
+            depth: 0,
+            buildSlackMcp: () => buildSlackMcp(slackCtx),
+            buildCanUseTool: () => buildCanUseTool(canUseToolCtx),
+            onTaskEvent: taskEventPoster,
+          }),
         });
-        sessionEntry.session.setCanUseTool(
-          buildCanUseTool({ client, channel: entry.channel, threadTs }),
-        );
+        sessionEntry.session.setCanUseTool(buildCanUseTool(canUseToolCtx));
 
         await sessionEntry.session.send(
           { text: entry.prompt },
@@ -65,7 +75,7 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
             onToolStart: (id, name) => streamer.toolStart(id, name),
             onToolEnd: (id, ok) => streamer.toolEnd(id, ok),
             onFinal: (text) => streamer.setText(text),
-            onTaskEvent: buildTaskEventPoster(client, entry.channel, threadTs),
+            onTaskEvent: taskEventPoster,
           },
         );
         await streamer.finalize();
