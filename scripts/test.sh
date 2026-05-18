@@ -17,6 +17,7 @@ TESTS=(
   src/slack/download.test.ts
   src/slack/consent.test.ts
   src/scheduler/scheduler.test.ts
+  src/agent/workdirStore.test.ts
 )
 
 for t in "${TESTS[@]}"; do

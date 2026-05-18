@@ -47,6 +47,12 @@ export class SlackStreamer {
     this.scheduleFlush();
   }
 
+  /** Replace the entire buffered text with the canonical final response. */
+  setText(text: string): void {
+    this.textBuffer = text;
+    this.scheduleFlush();
+  }
+
   toolStart(name: string): void {
     this.toolLines.push(`_🔧 ${name}…_`);
     this.scheduleFlush();

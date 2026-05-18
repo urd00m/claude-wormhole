@@ -225,7 +225,7 @@ The classifier is conservative — it prefers false positives over false negativ
 
 ## Working directories
 
-Each thread's working directory lives at:
+By default, each thread gets a sandbox at `sessions/<channel_id>:<thread_ts>/`:
 
 ```
 sessions/<channel_id>:<thread_ts>/
@@ -236,6 +236,27 @@ sessions/<channel_id>:<thread_ts>/
 You can `cd` in there yourself to see what the agent has been doing — generated diagrams, scratch files, etc.
 
 The `sessions/` directory is gitignored. Delete a subdirectory to "reset" a thread (the agent's in-memory session is independent; if the bot is running, you may also want to start a new top-level message).
+
+### Pointing a thread at a real project (CLAUDE.md, etc.)
+
+To make the agent work inside an actual project on disk — picking up its `CLAUDE.md`, repo structure, dependencies, etc. — just ask:
+
+```
+You:   work inside /Users/me/code/myproject
+Bot:   _🔧 set_workdir…_
+       _✅ set_workdir_
+       Workdir set to `/Users/me/code/myproject` for this thread. Your next
+       message will run there (CLAUDE.md will be reloaded if present).
+```
+
+A few notes:
+
+- **The change takes effect on the next message.** The turn that called `set_workdir` continues in the old directory; subsequent messages in this thread use the new one.
+- **Per thread.** Each thread has its own workdir override. Switching directories in one thread doesn't affect others.
+- **Persistent.** Overrides are stored in `data/workdirs.json` and survive bot restarts.
+- **CLAUDE.md is auto-loaded.** Anything the Claude Code CLI normally picks up — `CLAUDE.md`, `.claude/settings.json`, project skills — works when the workdir is a real project root.
+- **Switching back.** "Reset workdir" or "go back to the sandbox" → agent calls `reset_workdir`. Or pick a different absolute path.
+- **Validation.** The path must be absolute (with `~` expansion) and an existing directory. Relative paths and non-existent paths are rejected.
 
 ---
 

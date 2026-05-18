@@ -16,6 +16,8 @@ export type StreamHooks = {
   onText?: (chunk: string) => void;
   onToolStart?: (tool: string, input: Record<string, unknown>) => void;
   onToolEnd?: (tool: string, ok: boolean) => void;
+  /** Called once with the canonical final text after the agent finishes. */
+  onFinal?: (text: string) => void;
 };
 
 type SessionOpts = {
@@ -27,7 +29,7 @@ type SessionOpts = {
 
 export class Session {
   readonly threadKey: string;
-  readonly workdir: string;
+  workdir: string;
   private canUseTool?: CanUseTool;
   private mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
   private hasStarted = false;
@@ -47,6 +49,17 @@ export class Session {
     this.canUseTool = fn;
   }
 
+  /**
+   * Switch the working directory for subsequent agent runs. Resets the
+   * session-continue flag so the SDK starts fresh in the new directory
+   * (CLAUDE.md and other project context will be reloaded).
+   */
+  setWorkdir(newWorkdir: string): void {
+    if (newWorkdir === this.workdir) return;
+    this.workdir = newWorkdir;
+    this.hasStarted = false;
+  }
+
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     const prompt = buildPrompt(input);
 
@@ -61,6 +74,8 @@ export class Session {
         continue: this.hasStarted,
         canUseTool: this.canUseTool,
         mcpServers: this.mcpServers,
+        // Surface token-level deltas so the Slack message updates as the agent writes.
+        includePartialMessages: true,
         env: buildChildEnv(),
       },
     });
@@ -100,7 +115,6 @@ export class Session {
             for (const block of content) {
               if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
                 const tr = block as { tool_use_id?: string; is_error?: boolean };
-                // We don't have the tool name here, just the id; pass empty name and ok flag.
                 hooks.onToolEnd?.("", !tr.is_error);
               }
             }
@@ -120,7 +134,9 @@ export class Session {
     }
 
     this.hasStarted = true;
-    return { finalText: finalText || "_(no response)_" };
+    const out = finalText || "_(no response)_";
+    hooks.onFinal?.(out);
+    return { finalText: out };
   }
 }
 
@@ -137,7 +153,6 @@ function buildChildEnv(): Record<string, string> {
   if (env.ANTHROPIC_API_KEY) {
     out.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
   } else {
-    // Make sure no stale value leaks in from process.env if it was empty-string
     delete out.ANTHROPIC_API_KEY;
   }
   return out;

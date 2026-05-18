@@ -32,3 +32,4 @@ export const ROOT_DIR = path.resolve(here, "..");
 export const SESSIONS_DIR = path.join(ROOT_DIR, "sessions");
 export const DATA_DIR = path.join(ROOT_DIR, "data");
 export const CRONS_FILE = path.join(DATA_DIR, "crons.json");
+export const WORKDIRS_FILE = path.join(DATA_DIR, "workdirs.json");

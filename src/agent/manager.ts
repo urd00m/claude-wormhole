@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { SESSIONS_DIR } from "../config.js";
 import { Session } from "./session.js";
+import { getWorkdirStore } from "./workdirStore.js";
 
 export type ThreadKey = string;
 
@@ -55,9 +56,15 @@ export class SessionManager {
   async get(key: ThreadKey): Promise<SessionEntry> {
     let entry = this.entries.get(key);
     if (!entry) {
-      const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
-      const workdir = path.join(SESSIONS_DIR, safeKey);
-      await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
+      const override = getWorkdirStore().get(key);
+      let workdir: string;
+      if (override) {
+        workdir = override;
+      } else {
+        const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
+        workdir = path.join(SESSIONS_DIR, safeKey);
+        await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
+      }
       entry = new SessionEntry(new Session({ threadKey: key, workdir }));
       this.entries.set(key, entry);
     }

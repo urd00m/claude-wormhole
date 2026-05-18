@@ -6,6 +6,7 @@ import { SlackStreamer } from "./stream.js";
 import { downloadFile, type SlackFileRef } from "./download.js";
 import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
+import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
@@ -97,6 +98,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           threadTs: replyThreadTs,
           workdir: entry.session.workdir,
         }),
+        workdir: buildWorkdirMcp({ session: entry.session, threadKey: key }),
       };
       if (_scheduler) {
         mcpServers.cron = buildCronMcp({
@@ -116,6 +118,10 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           onText: (chunk) => streamer.appendText(chunk),
           onToolStart: (tool) => streamer.toolStart(tool),
           onToolEnd: (tool, ok) => streamer.toolEnd(tool, ok),
+          // Replace the streamed buffer with the SDK's canonical final text.
+          // This is the authoritative response and works even if no token
+          // deltas were emitted.
+          onFinal: (text) => streamer.setText(text),
         },
       );
       await streamer.finalize();

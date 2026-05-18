@@ -19,6 +19,7 @@ Think of it as Claude Code in your DMs.
 - **File output** — agent can post images/PDFs/diagrams back into the thread.
 - **Sub-agents** — the agent can spawn sub-agents (via the SDK's `Task` tool) for parallel or context-isolated work.
 - **Scheduled runs (cron)** — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
+- **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` and project context. Per-thread, persistent across restarts.
 
 ---
 
@@ -140,9 +141,11 @@ src/
 │   ├── systemPrompt.ts   # agent persona / instructions
 │   ├── guards.ts         # destructive-command classifier
 │   ├── canUseTool.ts     # permission hook → consent flow
+│   ├── workdirStore.ts   # per-thread workdir overrides (data/workdirs.json)
 │   └── tools/
 │       ├── slackPost.ts  # MCP tools: slack_post_message, slack_post_file
-│       └── cron.ts       # MCP tools: cron_add, cron_list, cron_remove
+│       ├── cron.ts       # MCP tools: cron_add, cron_list, cron_remove
+│       └── workdir.ts    # MCP tools: set_workdir, get_workdir, reset_workdir
 └── scheduler/
     ├── store.ts          # JSON-backed CronStore (data/crons.json)
     ├── scheduler.ts      # node-cron wrapper: add/remove/start/stop

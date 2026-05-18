@@ -4,6 +4,7 @@ import { SlackStreamer } from "../slack/stream.js";
 import { sessions, threadKeyOf } from "../agent/manager.js";
 import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
+import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import type { CronEntry } from "./store.js";
 import type { Scheduler } from "./scheduler.js";
@@ -50,6 +51,7 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
             currentChannel: entry.channel,
             createdBy: `cron:${entry.id}`,
           }),
+          workdir: buildWorkdirMcp({ session: sessionEntry.session, threadKey: key }),
         });
         sessionEntry.session.setCanUseTool(
           buildCanUseTool({ client, channel: entry.channel, threadTs }),
@@ -61,6 +63,7 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
             onText: (chunk) => streamer.appendText(chunk),
             onToolStart: (tool) => streamer.toolStart(tool),
             onToolEnd: (tool, ok) => streamer.toolEnd(tool, ok),
+            onFinal: (text) => streamer.setText(text),
           },
         );
         await streamer.finalize();
