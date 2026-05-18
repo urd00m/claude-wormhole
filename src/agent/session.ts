@@ -250,7 +250,17 @@ export class Session {
     // on subsequent sends we set `resume: sessionId` (continue our own
     // session by ID, NOT by cwd-most-recent). This eliminates cross-thread
     // bleed when multiple Slack threads happen to share a workdir.
-    const sessionIdField = this.hasStarted ? { resume: this.sessionId } : { sessionId: this.sessionId };
+    //
+    // Capture BOTH the id and the "is-first-send" flag here, because a
+    // mid-turn `set_workdir` (via the workdir MCP tool) can mutate
+    // `this.sessionId` and reset `this.hasStarted` to false while THIS
+    // send is still streaming. The SDK call we hand to the CLI uses the
+    // id we capture *now*, not whatever it gets rotated to later.
+    const sessionIdAtStart = this.sessionId;
+    const wasFirstSend = !this.hasStarted;
+    const sessionIdField = wasFirstSend
+      ? { sessionId: sessionIdAtStart }
+      : { resume: sessionIdAtStart };
 
     const q = this.queryFn({
       prompt,
@@ -454,7 +464,17 @@ export class Session {
       }
     }
 
-    this.hasStarted = true;
+    // Only mark "started" against the sessionId we actually handed to the
+    // SDK above. If `setWorkdir` ran mid-turn it rotated `this.sessionId`
+    // to a fresh UUID that was NEVER used to open a conversation — leaving
+    // `hasStarted=false` (as setWorkdir already did) lets the next send
+    // start that UUID cleanly with `{ sessionId }`. Without this guard we
+    // would flip `hasStarted=true` against the rotated UUID and the next
+    // send would try `{ resume: <never-started-UUID> }`, which the CLI
+    // rejects with "No conversation found with session ID: …".
+    if (this.sessionId === sessionIdAtStart) {
+      this.hasStarted = true;
+    }
     const out = finalText || "_(no response)_";
     hooks.onFinal?.(out);
     return { finalText: out };

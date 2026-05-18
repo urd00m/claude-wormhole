@@ -128,6 +128,79 @@ async function main() {
     assert(idAfter !== idBefore, "resetConversation rotates the id");
   }
 
+  // --- REGRESSION: setWorkdir called mid-send must not corrupt session state. ---
+  // Scenario: the agent invokes the `set_workdir` MCP tool DURING a send.
+  // The tool calls session.setWorkdir(...) which rotates `sessionId` and
+  // sets `hasStarted=false`. The currently-streaming send continues with
+  // the OLD sessionId. The bug was: end-of-send unconditionally set
+  // `hasStarted=true`, so the next send would `{ resume: <rotated UUID> }`
+  // — but that UUID was never used to start a conversation, and the CLI
+  // would reject it with "No conversation found with session ID: …".
+  //
+  // After the fix, the next send must start a fresh `{ sessionId: … }`,
+  // matching the post-rotation UUID, NOT resume it.
+  {
+    const captured: CapturedOptions[] = [];
+    let sessionRef: Session | null = null;
+    // Use a custom queryFn that triggers the mid-send rotation by calling
+    // setWorkdir on the session while we're still inside the for-await
+    // loop. That mirrors what the real `set_workdir` MCP tool does.
+    const midSendQuery: QueryFn = (params) => {
+      captured.push(params.options ?? {});
+      return (async function* () {
+        // Simulate the workdir tool firing mid-turn. The send loop hasn't
+        // exited yet — `this.sessionId` will get rotated before we return.
+        if (sessionRef && captured.length === 1) {
+          sessionRef.setWorkdir("/post/rotation/dir");
+        }
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+        } as never;
+      })();
+    };
+
+    const session = new Session({
+      threadKey: "thread_midsend_rotate",
+      workdir: "/pre/rotation/dir",
+      queryFn: midSendQuery,
+    });
+    sessionRef = session;
+
+    await session.send({ text: "first send rotates mid-turn" });
+    const firstId = captured[0].sessionId as string;
+    assert(typeof firstId === "string", "first send opens with sessionId");
+
+    // Second send must NOT try to resume the rotated UUID (the bug). It
+    // must start fresh with `{ sessionId: <rotated UUID> }` because no
+    // JSONL exists for it yet.
+    await session.send({ text: "second send after mid-turn rotation" });
+    assert(
+      captured[1].resume === undefined,
+      `after mid-send rotation, next send must NOT resume (got resume=${captured[1].resume})`,
+    );
+    assert(
+      typeof captured[1].sessionId === "string",
+      "after mid-send rotation, next send MUST start with sessionId (fresh)",
+    );
+    assert(
+      captured[1].sessionId !== firstId,
+      "the rotated sessionId must differ from the first send's id",
+    );
+    assert(
+      captured[1].cwd === "/post/rotation/dir",
+      "next send runs in the post-rotation workdir",
+    );
+
+    // And the send after THAT should properly resume the rotated id.
+    await session.send({ text: "third send" });
+    assert(
+      captured[2].resume === captured[1].sessionId,
+      "third send resumes the rotated id (now safely started by send #2)",
+    );
+  }
+
   console.log("✅ session isolation verified — per-thread session_ids, no cwd-based continue");
 }
 
