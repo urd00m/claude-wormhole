@@ -1,9 +1,11 @@
 // Verify the depth math for nested sub-agent spawn calls, the cap behavior
 // when wired into a canUseTool-shaped gate, and the explicit tool allowlist.
 import {
+  BACKGROUND_WORKER_TYPE,
   computeChildDepth,
   isSpawnTool,
   MAX_SUBAGENT_DEPTH,
+  rewriteSpawnInput,
   SUBAGENT_TOOL_ALLOWLIST,
 } from "./subagentDepth.js";
 
@@ -99,6 +101,49 @@ assert(
   assert(gate("Task", overId, depths) === "deny", "over-cap Task must deny");
 }
 assert(gate("Bash", "T_over", depths) === "allow", "non-spawn tool ignores depth");
+
+// rewriteSpawnInput: Claude-Code-style run_in_background gets translated.
+{
+  // Case 1: run_in_background: true with general-purpose → rewrite to background-worker
+  const r = rewriteSpawnInput({
+    subagent_type: "general-purpose",
+    prompt: "do the thing",
+    run_in_background: true,
+  });
+  assert(r.isBackground === true, "run_in_background: true → isBackground true");
+  assert(r.input.subagent_type === BACKGROUND_WORKER_TYPE, "subagent_type rewritten");
+  assert(!("run_in_background" in r.input), "run_in_background stripped from rewritten input");
+  assert(r.input.prompt === "do the thing", "other fields preserved");
+}
+{
+  // Case 2: run_in_background: "true" (stringified) also rewrites
+  const r = rewriteSpawnInput({ subagent_type: "general-purpose", run_in_background: "true" });
+  assert(r.isBackground === true, "stringified true also rewrites");
+  assert(r.input.subagent_type === BACKGROUND_WORKER_TYPE, "stringified true → background-worker");
+}
+{
+  // Case 3: explicit background-worker, no run_in_background → keep as-is, marked background
+  const r = rewriteSpawnInput({ subagent_type: BACKGROUND_WORKER_TYPE, prompt: "x" });
+  assert(r.isBackground === true, "explicit background-worker is background");
+  assert(r.input.subagent_type === BACKGROUND_WORKER_TYPE, "type preserved");
+}
+{
+  // Case 4: no run_in_background, general-purpose → unchanged, not background
+  const r = rewriteSpawnInput({ subagent_type: "general-purpose", prompt: "y" });
+  assert(r.isBackground === false, "plain general-purpose is not background");
+  assert(r.input.subagent_type === "general-purpose", "type preserved");
+}
+{
+  // Case 5: run_in_background: false → not background, no rewrite
+  const r = rewriteSpawnInput({ subagent_type: "general-purpose", run_in_background: false });
+  assert(r.isBackground === false, "run_in_background: false → not background");
+  assert(r.input.subagent_type === "general-purpose", "no rewrite when flag is false");
+}
+{
+  // Case 6: garbage truthy-ish values (1, "yes") → treated as NOT true, conservative
+  const r = rewriteSpawnInput({ subagent_type: "general-purpose", run_in_background: 1 });
+  assert(r.isBackground === false, "numeric 1 is not accepted as background flag (strict)");
+}
 
 console.log(
   `✅ subagent depth cap verified (MAX=${MAX_SUBAGENT_DEPTH}, allowlist size=${SUBAGENT_TOOL_ALLOWLIST.length})`,

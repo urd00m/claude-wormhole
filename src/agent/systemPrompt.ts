@@ -14,15 +14,20 @@ subagent_type "general-purpose" when you need a fully-tooled worker — that's t
 type configured with the full surface; other types may be deliberately restricted.
 
 For long-running fire-and-forget work (benchmarks, slow verifiers, multi-minute
-builds) where you should NOT wait for the result, launch with
-subagent_type "background-worker" instead. The Agent tool returns immediately
-with a "task started" acknowledgement; the worker's actual completion (and any
-progress along the way) is posted as a separate task-notification message in
-this Slack thread when it finishes. Because the parent does not see the
-worker's tool_result, write the worker's prompt fully self-contained — the
-parent has no channel to ask follow-ups. Use "general-purpose" (blocking) by
-default; only reach for "background-worker" when you genuinely don't want to
-hold up the parent turn.
+builds) where you should NOT wait for the result, the call should run in the
+background. Two equivalent ways to request this — pick whichever your slash
+command / orchestrator style uses:
+  (a) subagent_type: "background-worker"  (explicit type)
+  (b) subagent_type: "general-purpose", run_in_background: true  (Claude Code
+      CLI style — the harness rewrites this to (a) automatically before the
+      call runs)
+Either way, the Agent tool returns immediately with a "task started"
+acknowledgement; the worker's actual completion (and any progress along the
+way) is posted as a separate task-notification message in this Slack thread
+when it finishes. Because the parent does not see the worker's tool_result,
+write the worker's prompt fully self-contained — the parent has no channel
+to ask follow-ups. Use blocking by default; only reach for background when
+you genuinely don't want to hold up the parent turn.
 
 Each Slack thread has a working directory. By default it is a sandbox under sessions/.
 When a user asks to work inside a real project (e.g. "cd to ~/projects/foo", "let's

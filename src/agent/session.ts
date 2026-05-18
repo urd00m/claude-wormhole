@@ -3,11 +3,15 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 import { env } from "../config.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import {
+  BACKGROUND_WORKER_TYPE,
   computeChildDepth,
   isSpawnTool,
   MAX_SUBAGENT_DEPTH,
+  rewriteSpawnInput,
   SUBAGENT_TOOL_ALLOWLIST,
 } from "./subagentDepth.js";
+
+export { BACKGROUND_WORKER_TYPE } from "./subagentDepth.js";
 
 export type SessionInput = {
   text: string;
@@ -90,8 +94,6 @@ const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a paren
 
 const BACKGROUND_WORKER_PROMPT = `You are a background sub-agent. Your invocation returned to the parent immediately — the parent is NOT waiting on your tool_result. Do the work, then write your final report to the file path provided by the SDK (or to a file in the working directory, mentioned in your final summary). The parent will see your completion via a task-notification event in its Slack thread. You have the full tool surface; nested-Agent depth is bounded at ${MAX_SUBAGENT_DEPTH}. Be self-contained — the parent has no way to ask you follow-ups, so commit any context you need into your summary.`;
 
-export const BACKGROUND_WORKER_TYPE = "background-worker";
-
 const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").AgentDefinition> = {
   "general-purpose": {
     description:
@@ -151,6 +153,7 @@ export class Session {
     const userCanUseTool = this.canUseTool;
 
     const wrappedCanUseTool: CanUseTool = async (toolName, toolInput, options) => {
+      let effectiveInput = toolInput;
       if (isSpawnTool(toolName)) {
         // childDepthByToolUseId is populated when we see the issuing assistant
         // message. If the entry is missing (race with our async iterator),
@@ -162,9 +165,26 @@ export class Session {
             message: `sub-agent depth ${childDepth} exceeds cap ${MAX_SUBAGENT_DEPTH}`,
           };
         }
+        // Translate Claude-Code-style `run_in_background: true` into our
+        // background-worker subagent_type. The SDK's Agent tool input
+        // schema has no run_in_background field, so without this rewrite
+        // the flag would be silently dropped and the call would run
+        // blocking. Also re-tag for lifecycle-event surfacing in case the
+        // model only set the flag and not subagent_type.
+        const { input: rewritten, isBackground } = rewriteSpawnInput(toolInput);
+        effectiveInput = rewritten;
+        if (isBackground) backgroundToolUseIds.add(options.toolUseID);
       }
-      if (userCanUseTool) return userCanUseTool(toolName, toolInput, options);
-      return { behavior: "allow", updatedInput: toolInput };
+      if (userCanUseTool) {
+        const result = await userCanUseTool(toolName, effectiveInput, options);
+        // If the user gate allowed, make sure our rewritten input is what
+        // actually runs (the inner gate may have echoed the original).
+        if (result.behavior === "allow" && isSpawnTool(toolName)) {
+          return { behavior: "allow", updatedInput: effectiveInput };
+        }
+        return result;
+      }
+      return { behavior: "allow", updatedInput: effectiveInput };
     };
 
     const q = query({
@@ -221,10 +241,10 @@ export class Session {
           if (block.type === "tool_use" && isSpawnTool(block.name)) {
             const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
             childDepthByToolUseId.set(block.id, depth);
-            const subagentType = (block.input as { subagent_type?: unknown } | undefined)?.subagent_type;
-            if (typeof subagentType === "string" && subagentType === BACKGROUND_WORKER_TYPE) {
-              backgroundToolUseIds.add(block.id);
-            }
+            const { isBackground } = rewriteSpawnInput(
+              (block.input ?? {}) as Record<string, unknown>,
+            );
+            if (isBackground) backgroundToolUseIds.add(block.id);
           }
         }
       }

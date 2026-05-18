@@ -1,4 +1,12 @@
 /**
+ * Sub-agent type name for fire-and-forget background workers. Used in two
+ * places: (1) the AgentDefinition registered in session.ts under this key,
+ * (2) the rewrite below that translates `run_in_background: true` into a
+ * `subagent_type` selection.
+ */
+export const BACKGROUND_WORKER_TYPE = "background-worker";
+
+/**
  * Recursion cap for nested sub-agents. Sub-agents are allowed to call the
  * sub-agent-spawning tool, but the chain is bounded: the call is denied when
  * the spawned child would exceed this depth.
@@ -85,6 +93,45 @@ export const SUBAGENT_TOOL_ALLOWLIST: readonly string[] = [
  * assume the issuing agent is at depth 1; that's the lowest possible
  * non-main depth and keeps the cap conservative.
  */
+/**
+ * Translate an Agent/Task tool input into the canonical form the SDK
+ * understands. Two purposes:
+ *
+ *   1. If the model passed `run_in_background: true` (the Claude Code CLI
+ *      style), rewrite it to `subagent_type: "background-worker"` so our
+ *      AgentDefinition with `background: true` is what actually runs. The
+ *      SDK exposes no `run_in_background` field on the Agent tool's input
+ *      schema; without rewriting, the flag is silently ignored and the
+ *      call runs blocking.
+ *
+ *   2. Surface whether the resulting call is background, so the session
+ *      loop can tag the tool_use_id and route task-lifecycle events to
+ *      Slack.
+ *
+ * Acceptable truthy values for run_in_background: literal `true` and the
+ * string "true" (some clients stringify booleans on tool calls). Anything
+ * else is treated as not-background.
+ */
+export function rewriteSpawnInput(
+  input: Record<string, unknown>,
+): { input: Record<string, unknown>; isBackground: boolean } {
+  const rib = input.run_in_background;
+  const wantsBackground = rib === true || rib === "true";
+  const explicitType = typeof input.subagent_type === "string" ? input.subagent_type : undefined;
+  const explicitBackground = explicitType === BACKGROUND_WORKER_TYPE;
+
+  if (!wantsBackground) {
+    return { input, isBackground: explicitBackground };
+  }
+
+  // Drop run_in_background (the SDK's Agent tool doesn't accept it; leaving
+  // it in causes the CLI to log an unknown-parameter warning) and force
+  // subagent_type to background-worker.
+  const rewritten: Record<string, unknown> = { ...input, subagent_type: BACKGROUND_WORKER_TYPE };
+  delete rewritten.run_in_background;
+  return { input: rewritten, isBackground: true };
+}
+
 export function computeChildDepth(
   parentToolUseId: string | null,
   childDepths: Map<string, number>,
