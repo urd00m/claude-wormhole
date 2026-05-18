@@ -19,22 +19,25 @@ export type ConsentRequest = {
   toolName: string;
   command: string;
   reason: string;
+  /** If set, the request is coming from a sub-agent rather than the main agent. */
+  agentID?: string;
 };
 
 export async function askConsent(req: ConsentRequest): Promise<boolean> {
-  const { client, channel, threadTs, toolName, command, reason } = req;
+  const { client, channel, threadTs, toolName, command, reason, agentID } = req;
   const id = `${channel}:${threadTs}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
+  const who = agentID ? `Sub-agent (\`${agentID}\`)` : "Agent";
   const post = await client.chat.postMessage({
     channel,
     thread_ts: threadTs,
-    text: `🛑 Agent wants to run ${toolName}: \`${truncate(command)}\` (${reason})`,
+    text: `🛑 ${who} wants to run ${toolName}: \`${truncate(command)}\` (${reason})`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:no_entry: *Agent wants to run ${toolName}*\nReason: _${reason}_\n\`\`\`${truncate(command)}\`\`\`\nReply *yes* / *no* in this thread, or click below.`,
+          text: `:no_entry: *${who} wants to run ${toolName}*\nReason: _${reason}_\n\`\`\`${truncate(command)}\`\`\`\nReply *yes* / *no* in this thread, or click below.`,
         },
       },
       {

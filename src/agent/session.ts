@@ -2,6 +2,7 @@ import { query, type CanUseTool, type SDKMessage } from "@anthropic-ai/claude-ag
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { env } from "../config.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
+import { computeChildDepth, MAX_SUBAGENT_DEPTH } from "./subagentDepth.js";
 
 export type SessionInput = {
   text: string;
@@ -27,6 +28,24 @@ type SessionOpts = {
   canUseTool?: CanUseTool;
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
 };
+
+/**
+ * Override the built-in `general-purpose` sub-agent. The SDK doc for
+ * AgentDefinition.tools says: "If omitted, inherits all tools from parent."
+ * Omitting `tools` here means sub-agents inherit the parent's full surface,
+ * including `Task` — so they can spawn further sub-agents. Recursion is
+ * bounded by MAX_SUBAGENT_DEPTH, enforced in the canUseTool wrapper below.
+ */
+const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a parent agent. You have inherited the full tool surface — including the Task tool, so you may spawn further sub-agents for parallel or context-isolated work. Recursive sub-agent depth is capped at ${MAX_SUBAGENT_DEPTH}; deeper spawns will be denied. Be concise: do the work and report a tight result to the parent.`;
+
+const RECURSIVE_AGENTS = {
+  "general-purpose": {
+    description:
+      "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Inherits the parent's full tool surface (including Task) so it can spawn further sub-agents up to a depth cap.",
+    prompt: SUBAGENT_PROMPT,
+    // tools omitted on purpose → inherit everything from parent
+  },
+} as const;
 
 export class Session {
   readonly threadKey: string;
@@ -64,6 +83,29 @@ export class Session {
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     const prompt = buildPrompt(input);
 
+    // Per-turn tool_use_id → spawned-child-depth map. Built incrementally as
+    // assistant messages stream in. Consulted by the canUseTool wrapper to
+    // deny Task calls past MAX_SUBAGENT_DEPTH.
+    const childDepthByToolUseId = new Map<string, number>();
+    const userCanUseTool = this.canUseTool;
+
+    const wrappedCanUseTool: CanUseTool = async (toolName, toolInput, options) => {
+      if (toolName === "Task") {
+        // childDepthByToolUseId is populated when we see the issuing assistant
+        // message. If the entry is missing (race with our async iterator),
+        // default to 1 so we never spuriously deny the first level.
+        const childDepth = childDepthByToolUseId.get(options.toolUseID) ?? 1;
+        if (childDepth > MAX_SUBAGENT_DEPTH) {
+          return {
+            behavior: "deny",
+            message: `sub-agent depth ${childDepth} exceeds cap ${MAX_SUBAGENT_DEPTH}`,
+          };
+        }
+      }
+      if (userCanUseTool) return userCanUseTool(toolName, toolInput, options);
+      return { behavior: "allow", updatedInput: toolInput };
+    };
+
     const q = query({
       prompt,
       options: {
@@ -71,9 +113,10 @@ export class Session {
         model: env.ANTHROPIC_MODEL,
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
+        agents: RECURSIVE_AGENTS,
         // Continue the prior session for this thread once we've started one.
         continue: this.hasStarted,
-        canUseTool: this.canUseTool,
+        canUseTool: wrappedCanUseTool,
         mcpServers: this.mcpServers,
         // Surface token-level deltas so the Slack message updates as the agent writes.
         includePartialMessages: true,
@@ -85,8 +128,33 @@ export class Session {
     const seenToolStarts = new Set<string>();
 
     for await (const msg of q as AsyncIterable<SDKMessage>) {
+      // Sub-agent messages carry a non-null parent_tool_use_id. Skip
+      // user-visible side effects for them so the parent thread's stream,
+      // final-text capture, and tool strip reflect only the main agent.
+      // The parent's `Task` tool_use itself lives on a main-agent assistant
+      // message (parent_tool_use_id: null) and still surfaces normally.
+      const parentToolUseId =
+        "parent_tool_use_id" in msg
+          ? (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null
+          : null;
+      const isSubAgent = parentToolUseId != null;
+
+      // Depth bookkeeping runs for ALL assistant messages (sub-agent or not)
+      // so the cap fires on nested Task calls. This must happen before the
+      // isSubAgent gate below.
+      if (msg.type === "assistant") {
+        const content = msg.message?.content ?? [];
+        for (const block of content) {
+          if (block.type === "tool_use" && block.name === "Task") {
+            const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
+            childDepthByToolUseId.set(block.id, depth);
+          }
+        }
+      }
+
       switch (msg.type) {
         case "stream_event": {
+          if (isSubAgent) break;
           // Incremental token deltas — surface as text-only chunks.
           const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } };
           if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
@@ -95,6 +163,7 @@ export class Session {
           break;
         }
         case "assistant": {
+          if (isSubAgent) break;
           // Full assistant turn — capture final text and tool_use starts.
           const content = msg.message?.content ?? [];
           for (const block of content) {
@@ -110,6 +179,7 @@ export class Session {
           break;
         }
         case "user": {
+          if (isSubAgent) break;
           // Tool results come back as user messages with tool_result blocks.
           const content = msg.message?.content;
           if (Array.isArray(content)) {

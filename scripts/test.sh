@@ -11,6 +11,8 @@ export ANTHROPIC_API_KEY=stub
 
 TESTS=(
   src/agent/guards.test.ts
+  src/agent/canUseTool.test.ts
+  src/agent/subagentDepth.test.ts
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
