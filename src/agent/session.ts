@@ -2,7 +2,12 @@ import { query, type CanUseTool, type SDKMessage } from "@anthropic-ai/claude-ag
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { env } from "../config.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
-import { computeChildDepth, MAX_SUBAGENT_DEPTH } from "./subagentDepth.js";
+import {
+  computeChildDepth,
+  isSpawnTool,
+  MAX_SUBAGENT_DEPTH,
+  SUBAGENT_TOOL_ALLOWLIST,
+} from "./subagentDepth.js";
 
 export type SessionInput = {
   text: string;
@@ -30,22 +35,26 @@ type SessionOpts = {
 };
 
 /**
- * Override the built-in `general-purpose` sub-agent. The SDK doc for
- * AgentDefinition.tools says: "If omitted, inherits all tools from parent."
- * Omitting `tools` here means sub-agents inherit the parent's full surface,
- * including `Task` — so they can spawn further sub-agents. Recursion is
- * bounded by MAX_SUBAGENT_DEPTH, enforced in the canUseTool wrapper below.
+ * Override the built-in `general-purpose` sub-agent so it gets the full tool
+ * surface — Bash, file tools, web tools, AND the spawning tool (`Agent`),
+ * which the SDK's default for unconfigured `general-purpose` omits as a
+ * safety measure. Tools are listed explicitly here rather than via the
+ * "omit to inherit" semantic, because in practice that inheritance does
+ * NOT include Bash/Agent.
+ *
+ * Recursive sub-agent nesting is bounded by MAX_SUBAGENT_DEPTH, enforced
+ * in the canUseTool wrapper below.
  */
-const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a parent agent. You have inherited the full tool surface — including the Task tool, so you may spawn further sub-agents for parallel or context-isolated work. Recursive sub-agent depth is capped at ${MAX_SUBAGENT_DEPTH}; deeper spawns will be denied. Be concise: do the work and report a tight result to the parent.`;
+const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a parent agent. You have the full Claude Code tool surface — Bash, Read/Write/Edit, Grep/Glob, WebFetch/WebSearch — AND the Agent tool, so you may spawn further sub-agents (Planner / Critic / Verifier / workers) for parallel or context-isolated work. Recursive sub-agent depth is capped at ${MAX_SUBAGENT_DEPTH}; deeper spawns will be denied with a clear error. Be concise: do the work and report a tight, self-contained result to the parent.`;
 
-const RECURSIVE_AGENTS = {
+const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").AgentDefinition> = {
   "general-purpose": {
     description:
-      "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Inherits the parent's full tool surface (including Task) so it can spawn further sub-agents up to a depth cap.",
+      "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Has the full Claude Code tool surface including Bash and the Agent tool, so it can spawn further sub-agents up to a depth cap.",
     prompt: SUBAGENT_PROMPT,
-    // tools omitted on purpose → inherit everything from parent
+    tools: [...SUBAGENT_TOOL_ALLOWLIST],
   },
-} as const;
+};
 
 export class Session {
   readonly threadKey: string;
@@ -90,7 +99,7 @@ export class Session {
     const userCanUseTool = this.canUseTool;
 
     const wrappedCanUseTool: CanUseTool = async (toolName, toolInput, options) => {
-      if (toolName === "Task") {
+      if (isSpawnTool(toolName)) {
         // childDepthByToolUseId is populated when we see the issuing assistant
         // message. If the entry is missing (race with our async iterator),
         // default to 1 so we never spuriously deny the first level.
@@ -145,7 +154,7 @@ export class Session {
       if (msg.type === "assistant") {
         const content = msg.message?.content ?? [];
         for (const block of content) {
-          if (block.type === "tool_use" && block.name === "Task") {
+          if (block.type === "tool_use" && isSpawnTool(block.name)) {
             const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
             childDepthByToolUseId.set(block.id, depth);
           }
