@@ -22,6 +22,14 @@
 - [ ] Sub-agent launching via SDK `Task` tool (no extra code, just allowlist)
 - [ ] Per-thread working dir under `sessions/<threadKey>/`
 - [ ] Per-thread queue so concurrent messages don't interleave tool calls
+- [x] **Scheduled runs (cron)** — agent uses `cron_add` / `cron_list` / `cron_remove` MCP tools; jobs persisted to `data/crons.json`; fired jobs open a fresh thread in the target channel
+
+## Deferred — cron hardening
+
+- [ ] Per-user ACLs (who can add/remove crons in a given channel)
+- [ ] Bounded cron count and prompt length to avoid abuse
+- [ ] Backfill / catch-up runs after long downtime
+- [ ] Cron history (last N firings, success/failure) viewable via tool
 
 ## Deferred — multi-workspace
 

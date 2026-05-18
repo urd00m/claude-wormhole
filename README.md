@@ -18,6 +18,7 @@ Think of it as Claude Code in your DMs.
 - **File ingest** — drop a PDF, image, or any file into the Slack thread; the bot reads it.
 - **File output** — agent can post images/PDFs/diagrams back into the thread.
 - **Sub-agents** — the agent can spawn sub-agents (via the SDK's `Task` tool) for parallel or context-isolated work.
+- **Scheduled runs (cron)** — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 
 ---
 
@@ -133,14 +134,19 @@ src/
 │   ├── upload.ts         # files.uploadV2 wrapper
 │   ├── consent.ts        # destructive-command approval flow
 │   └── interactions.ts   # block_actions handler for buttons
-└── agent/
-    ├── manager.ts        # Map<threadKey, Session> + per-thread queue
-    ├── session.ts        # Agent SDK query() wrapper
-    ├── systemPrompt.ts   # agent persona / instructions
-    ├── guards.ts         # destructive-command classifier
-    ├── canUseTool.ts     # permission hook → consent flow
-    └── tools/
-        └── slackPost.ts  # MCP tools: slack_post_message, slack_post_file
+├── agent/
+│   ├── manager.ts        # Map<threadKey, Session> + per-thread queue
+│   ├── session.ts        # Agent SDK query() wrapper
+│   ├── systemPrompt.ts   # agent persona / instructions
+│   ├── guards.ts         # destructive-command classifier
+│   ├── canUseTool.ts     # permission hook → consent flow
+│   └── tools/
+│       ├── slackPost.ts  # MCP tools: slack_post_message, slack_post_file
+│       └── cron.ts       # MCP tools: cron_add, cron_list, cron_remove
+└── scheduler/
+    ├── store.ts          # JSON-backed CronStore (data/crons.json)
+    ├── scheduler.ts      # node-cron wrapper: add/remove/start/stop
+    └── runner.ts         # fire handler: synthesize a thread + run the agent
 ```
 
 `scripts/`, `slack-manifest.yaml`, `.env.example`, and `TODO.md` (deferred features) live at the repo root.

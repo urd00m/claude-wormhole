@@ -5,8 +5,15 @@ import { Heartbeat } from "./heartbeat.js";
 import { SlackStreamer } from "./stream.js";
 import { downloadFile, type SlackFileRef } from "./download.js";
 import { buildSlackMcp } from "../agent/tools/slackPost.js";
+import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
+import type { Scheduler } from "../scheduler/scheduler.js";
+
+let _scheduler: Scheduler | null = null;
+export function setSchedulerForHandlers(s: Scheduler): void {
+  _scheduler = s;
+}
 
 type Common = {
   channel: string;
@@ -82,15 +89,23 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         }
       }
 
-      // Wire per-thread MCP server + consent gate
-      entry.session.setMcpServers({
+      // Wire per-thread MCP servers + consent gate
+      const mcpServers: Record<string, ReturnType<typeof buildSlackMcp>> = {
         slack: buildSlackMcp({
           client,
           channel: msg.channel,
           threadTs: replyThreadTs,
           workdir: entry.session.workdir,
         }),
-      });
+      };
+      if (_scheduler) {
+        mcpServers.cron = buildCronMcp({
+          scheduler: _scheduler,
+          currentChannel: msg.channel,
+          createdBy: msg.user,
+        });
+      }
+      entry.session.setMcpServers(mcpServers);
       entry.session.setCanUseTool(
         buildCanUseTool({ client, channel: msg.channel, threadTs: replyThreadTs }),
       );

@@ -3,5 +3,6 @@ dist/
 .env
 .env.local
 sessions/
+data/
 *.log
 .DS_Store

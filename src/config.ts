@@ -29,3 +29,5 @@ export const env = parsed.data;
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(here, "..");
 export const SESSIONS_DIR = path.join(ROOT_DIR, "sessions");
+export const DATA_DIR = path.join(ROOT_DIR, "data");
+export const CRONS_FILE = path.join(DATA_DIR, "crons.json");

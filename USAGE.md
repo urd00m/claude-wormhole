@@ -123,6 +123,67 @@ Sub-agents inherit the **same consent gate** — if they want to run a destructi
 
 ---
 
+## Scheduled runs (cron)
+
+The agent can register recurring jobs. Just ask in plain English — the agent translates your phrasing into a cron expression and calls the `cron_add` tool.
+
+```
+You:   every weekday at 9am, summarize yesterday's commits in this channel
+Bot:   _🔧 cron_add…_
+       _✅ cron_add_
+       Scheduled `cron_l3m9_k2p1` — `0 9 * * 1-5`
+       Channel: <#C123>
+       Next run: 2026-05-19T16:00:00Z
+```
+
+### What happens when a cron fires
+
+1. The bot posts a fresh top-level message in the target channel: `🕒 scheduled run: <description>` — this becomes the new thread root.
+2. A new session is created for that thread with the stored prompt as its first input.
+3. The agent runs, streaming output into the thread, with the usual heartbeat reactions on the placeholder message.
+4. You (or anyone) can reply in that thread and continue the conversation like any other thread.
+
+The fired prompt has no memory of the conversation that scheduled it — write self-contained prompts.
+
+### Inspecting and removing schedules
+
+```
+You:   what crons do I have?
+Bot:   _🔧 cron_list…_
+       • `cron_l3m9_k2p1` — `0 9 * * 1-5`
+         channel: <#C123> · next: 2026-05-19T16:00:00Z
+         prompt: summarize yesterday's commits in this channel
+
+You:   cancel that one
+Bot:   _🔧 cron_remove…_
+       Removed `cron_l3m9_k2p1`.
+```
+
+### Cron expression cheatsheet
+
+5 fields: `minute hour day-of-month month day-of-week`
+
+| Expression | Meaning |
+|---|---|
+| `*/15 * * * *` | Every 15 minutes |
+| `0 9 * * *` | Daily at 9:00 AM |
+| `0 9 * * 1-5` | Weekdays at 9:00 AM |
+| `0 9 * * 1` | Mondays at 9:00 AM |
+| `0 0 1 * *` | First of each month at midnight |
+| `0 17 * * 5` | Fridays at 5:00 PM |
+
+Add a sixth field at the front for seconds (`* * * * * *` = every second), but you'll rarely want that.
+
+You can also specify a timezone: "every Monday at 9am Pacific" → the agent passes `timezone: 'America/Los_Angeles'`.
+
+### Persistence
+
+Schedules are stored in `data/crons.json` and survive bot restarts. When the bot boots, you'll see `⏰ Scheduler active: N crons loaded` if any are registered.
+
+To wipe all crons: stop the bot, delete `data/crons.json`, restart.
+
+---
+
 ## Consent prompts (destructive commands)
 
 If the agent wants to run a command that could destroy data, it pauses and posts a message like:

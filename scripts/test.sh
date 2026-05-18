@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run every verification script in src/**/*.test.ts. Stubbed env vars satisfy
+# zod schema; no real Slack/Anthropic credentials needed.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export SLACK_APP_TOKEN=xapp-stub
+export SLACK_BOT_TOKEN=xoxb-stub
+export SLACK_SIGNING_SECRET=stub
+export ANTHROPIC_API_KEY=stub
+
+TESTS=(
+  src/agent/guards.test.ts
+  src/slack/heartbeat.test.ts
+  src/agent/manager.test.ts
+  src/slack/stream.test.ts
+  src/slack/download.test.ts
+  src/slack/consent.test.ts
+  src/scheduler/scheduler.test.ts
+)
+
+for t in "${TESTS[@]}"; do
+  npx tsx "$t"
+done
