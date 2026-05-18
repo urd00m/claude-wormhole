@@ -32,30 +32,60 @@ export function isSpawnTool(name: string): boolean {
 }
 
 /**
- * Tools sub-agents must NOT have. Used as `disallowedTools` on each agent
- * definition; `tools` is intentionally omitted so the sub-agent INHERITS
- * the parent's full preset surface (which includes Bash, Agent, Task,
- * Read/Write/Edit, web tools, etc.).
+ * EXPLICIT tool allowlist for sub-agents. Used as `tools` on each
+ * AgentDefinition, NOT `disallowedTools`.
  *
- * Why this design (and not an explicit allowlist):
- *   AgentDefinition.tools only accepts string[] — there is no `{ type:
- *   'preset', preset: 'claude_code' }` form for sub-agents like the
- *   top-level Options.tools has. Setting an explicit list means EVERY
- *   tool we want the sub-agent to have must appear under the exact name
- *   the CLI uses internally for matching. In practice that's brittle:
- *   the spawning tool has alternate names ("Agent" vs "Task") in the
- *   binary, and a missed entry silently strips a critical capability.
+ * Why explicit (not inherit-from-parent):
+ *   The CLI has a hardcoded anti-recursion behavior — when a sub-agent's
+ *   `tools` field is omitted (i.e. relying on inheritance from the
+ *   parent's `tools: { type: "preset", preset: "claude_code" }`), the CLI
+ *   silently strips `Agent` and `Task` from the inherited surface to
+ *   prevent unbounded sub-agent nesting. This was confirmed by a live
+ *   integration test (scripts/it.sh toolSurface) that dumped the
+ *   spawned sub-agent's tool list: every preset tool was present EXCEPT
+ *   the spawning ones. Setting `tools` explicitly here overrides that
+ *   auto-strip — if "Agent" or "Task" appears in this allowlist, the
+ *   CLI keeps it.
  *
- *   Per the SDK doc on AgentDefinition.tools: "If omitted, inherits all
- *   tools from parent." Omitting `tools` and using `disallowedTools` to
- *   subtract a small known set gives sub-agents the full inherited
- *   surface with surgical exclusions — no name-match surprises.
+ *   Recursion is bounded by MAX_SUBAGENT_DEPTH (enforced in the
+ *   canUseTool wrapper in session.ts), so re-enabling spawn for
+ *   sub-agents is safe.
  *
- * Excluded:
- *   - set_workdir / reset_workdir — a sub-agent must not hijack the
- *     parent thread's cwd. Read access (`get_workdir`) is fine.
- *   - cron_add / cron_remove — a sub-agent must not persist schedules
- *     without an explicit user request. Read (`cron_list`) is fine.
+ * Includes:
+ *   - Canonical Claude Code surface (Bash, file tools, web tools).
+ *   - Both spawn-tool names (Agent and Task) — the CLI uses both
+ *     internally; listing only one of them risks the same silent strip.
+ *   - Read-only MCP tools and Slack-post MCP tools.
+ *
+ * Deliberately omitted (sub-agent isolation):
+ *   - mcp__workdir__set_workdir / reset_workdir
+ *   - mcp__cron__cron_add / cron_remove
+ */
+export const SUBAGENT_TOOLS: readonly string[] = [
+  "Bash",
+  "Read",
+  "Write",
+  "Edit",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "WebSearch",
+  "NotebookEdit",
+  "NotebookRead",
+  "TodoWrite",
+  "Agent",
+  "Task",
+  "mcp__slack__slack_post_message",
+  "mcp__slack__slack_post_file",
+  "mcp__workdir__get_workdir",
+  "mcp__cron__cron_list",
+];
+
+/**
+ * Kept for backwards compatibility / belt-and-suspenders. With explicit
+ * `tools` set, these tools are already absent from the surface, but
+ * passing them via `disallowedTools` as well ensures they stay blocked
+ * even if a future refactor moves to inherit-and-subtract.
  */
 export const SUBAGENT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__workdir__set_workdir",

@@ -9,6 +9,7 @@ import {
   MAX_SUBAGENT_DEPTH,
   rewriteSpawnInput,
   SUBAGENT_DISALLOWED_TOOLS,
+  SUBAGENT_TOOLS,
 } from "./subagentDepth.js";
 
 export { BACKGROUND_WORKER_TYPE } from "./subagentDepth.js";
@@ -107,20 +108,22 @@ const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a paren
 
 const BACKGROUND_WORKER_PROMPT = `You are a background sub-agent. Your invocation returned to the parent immediately — the parent is NOT waiting on your tool_result. Do the work, then write your final report to the file path provided by the SDK (or to a file in the working directory, mentioned in your final summary). The parent will see your completion via a task-notification event in its Slack thread. You have the full tool surface; nested-Agent depth is bounded at ${MAX_SUBAGENT_DEPTH}. Be self-contained — the parent has no way to ask you follow-ups, so commit any context you need into your summary.`;
 
-// IMPORTANT: `tools` is intentionally NOT set on these AgentDefinitions.
-// Per the SDK doc, omitting `tools` means the sub-agent "inherits all tools
-// from parent" — which for us is the top-level `tools: { type: "preset",
-// preset: "claude_code" }` (the full surface, including Bash, Agent, Task,
-// Read/Write/Edit, web tools). Setting an explicit string[] here would
-// require us to name every tool under the exact identifier the CLI uses
-// internally for allowlist matching, and the spawning tool has alternate
-// names ("Agent" vs "Task") which produced silent strips in prior attempts.
-// Use `disallowedTools` to subtract only the small known-bad set.
+// IMPORTANT: `tools` is set EXPLICITLY on each AgentDefinition — including
+// "Agent" and "Task". The earlier "omit tools to inherit from parent"
+// approach failed in practice because the CLI silently strips the
+// spawning tool from inherited surfaces as an anti-recursion safety. The
+// live integration test `scripts/it.sh toolSurface` confirmed: with
+// `tools` omitted, the sub-agent's reported surface contained every
+// preset tool (Bash, Read, Write, Edit, Grep, Glob, web tools, etc.)
+// EXCEPT Agent/Task. Listing the spawn tool names here overrides the
+// auto-strip. Recursion is bounded by MAX_SUBAGENT_DEPTH in canUseTool,
+// so this is safe.
 const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").AgentDefinition> = {
   "general-purpose": {
     description:
-      "General-purpose agent. Inherits the parent's full Claude Code tool surface (Bash, Read/Write/Edit, Grep/Glob, web tools, AND the Agent/Task spawning tool) so it can run repo Python/Bash tooling, read project files, and recursively spawn further sub-agents (Planner / Plan-critic / Executor / Analyzer / Verifier / Verdict-critic workers) up to a depth cap.",
+      "General-purpose agent with the full Claude Code tool surface (Bash, Read/Write/Edit, Grep/Glob, web tools, AND the Agent/Task spawning tool) so it can run repo Python/Bash tooling, read project files, and recursively spawn further sub-agents (Planner / Plan-critic / Executor / Analyzer / Verifier / Verdict-critic workers) up to a depth cap.",
     prompt: SUBAGENT_PROMPT,
+    tools: [...SUBAGENT_TOOLS],
     disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
     // Rely on the parent's canUseTool (which propagates with agentID set)
     // for policy, not the CLI's internal gates which would otherwise
@@ -129,8 +132,9 @@ const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").
   },
   [BACKGROUND_WORKER_TYPE]: {
     description:
-      "Fire-and-forget background worker. Use for long-running tasks (benchmarks, large builds, slow verifiers) where the parent should not wait on the result. The Agent tool returns immediately; completion is reported back into the Slack thread via a task-notification event when the worker finishes. Inherits the same full tool surface as general-purpose.",
+      "Fire-and-forget background worker. Use for long-running tasks (benchmarks, large builds, slow verifiers) where the parent should not wait on the result. The Agent tool returns immediately; completion is reported back into the Slack thread via a task-notification event when the worker finishes. Has the same full tool surface as general-purpose.",
     prompt: BACKGROUND_WORKER_PROMPT,
+    tools: [...SUBAGENT_TOOLS],
     disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
     background: true,
     permissionMode: "bypassPermissions",

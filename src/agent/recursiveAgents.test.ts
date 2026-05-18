@@ -25,26 +25,13 @@ for (const name of REQUIRED_AGENTS) {
   assert(name in RECURSIVE_AGENTS, `agent definition '${name}' must be registered`);
 }
 
-// --- 2. tools MUST be omitted on every agent. ------------------------------
-// An explicit tools array means the sub-agent only sees those names.
-// Spawning has alternate names in the CLI binary ("Agent" / "Task"), so
-// listing one and not the other silently strips the spawn capability.
-// Omitting `tools` inherits the parent's full preset surface — that's the
-// design the user's orchestrator pattern needs.
+// --- 2. tools MUST be set EXPLICITLY and include the spawning tool.
+// The CLI's anti-recursion behavior silently strips Agent/Task from any
+// surface that's inherited from the parent's preset; listing them
+// explicitly here overrides that. Confirmed by live integration test
+// scripts/it.sh toolSurface (commit 5300e2a era reproduced the strip).
 
-for (const name of REQUIRED_AGENTS) {
-  const def = RECURSIVE_AGENTS[name];
-  assert(
-    !("tools" in def) || def.tools === undefined,
-    `agent '${name}': tools must be omitted (let it inherit parent's preset). ` +
-      `Explicit tools arrays silently dropped Agent/Task in prior versions and broke orchestrator → worker patterns.`,
-  );
-}
-
-// --- 3. disallowedTools must NOT contain Bash, Agent, Task, or any of the
-// canonical Claude Code surface tools the user needs to run repo tooling.
-
-const REQUIRED_INHERITABLE_TOOLS = [
+const REQUIRED_TOOLS = [
   "Bash",
   "Agent",
   "Task",
@@ -62,13 +49,33 @@ const REQUIRED_INHERITABLE_TOOLS = [
 
 for (const name of REQUIRED_AGENTS) {
   const def = RECURSIVE_AGENTS[name];
-  const disallowed = def.disallowedTools ?? [];
-  for (const tool of REQUIRED_INHERITABLE_TOOLS) {
+  assert(
+    Array.isArray(def.tools),
+    `agent '${name}': tools must be set EXPLICITLY (not omitted). ` +
+      `Omitting it means inherit-from-parent, which strips Agent/Task as anti-recursion safety. ` +
+      `See subagentDepth.ts SUBAGENT_TOOLS comment.`,
+  );
+  const tools = def.tools as string[];
+  for (const required of REQUIRED_TOOLS) {
     assert(
-      !disallowed.includes(tool),
-      `agent '${name}': '${tool}' must NOT be in disallowedTools. ` +
-        `Sub-agents need it to satisfy the orchestrator/worker spawn pattern (validation criteria 3/6/7/8) or to run repo Python/Bash tooling (criterion 5).`,
+      tools.includes(required),
+      `agent '${name}': required tool '${required}' must appear in tools array. ` +
+        `Missing this breaks validation.md criteria 3/5/6/7/8 (sub-agents need the full canonical surface + the spawning tool).`,
     );
+  }
+}
+
+// --- 3. tools must NOT contain the four parent-state mutators.
+for (const name of REQUIRED_AGENTS) {
+  const def = RECURSIVE_AGENTS[name];
+  const tools = (def.tools as string[]) ?? [];
+  for (const bad of [
+    "mcp__workdir__set_workdir",
+    "mcp__workdir__reset_workdir",
+    "mcp__cron__cron_add",
+    "mcp__cron__cron_remove",
+  ]) {
+    assert(!tools.includes(bad), `agent '${name}': '${bad}' must NOT appear in tools (sub-agent isolation).`);
   }
 }
 
