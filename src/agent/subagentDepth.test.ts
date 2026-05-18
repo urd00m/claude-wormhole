@@ -21,6 +21,11 @@ assert(!isSpawnTool("agent"), "spawn-tool match is case-sensitive");
 // orchestrator → planner → verifier patterns fail at runtime.
 assert(SUBAGENT_TOOL_ALLOWLIST.includes("Bash"), "sub-agents must have Bash");
 assert(SUBAGENT_TOOL_ALLOWLIST.includes("Agent"), "sub-agents must have Agent (for nested spawn)");
+assert(
+  SUBAGENT_TOOL_ALLOWLIST.includes("Task"),
+  "sub-agents must have Task (CLI alternate spawn name; the binary contains both strings)",
+);
+assert(SUBAGENT_TOOL_ALLOWLIST.includes("NotebookRead"), "sub-agents need NotebookRead");
 assert(SUBAGENT_TOOL_ALLOWLIST.includes("Read"), "sub-agents must have Read");
 assert(SUBAGENT_TOOL_ALLOWLIST.includes("Write"), "sub-agents must have Write");
 assert(SUBAGENT_TOOL_ALLOWLIST.includes("Edit"), "sub-agents must have Edit");

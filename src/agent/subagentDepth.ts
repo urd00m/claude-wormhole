@@ -55,8 +55,14 @@ export const SUBAGENT_TOOL_ALLOWLIST: readonly string[] = [
   "WebFetch",
   "WebSearch",
   "NotebookEdit",
+  "NotebookRead",
   "TodoWrite",
+  // Both names for the sub-agent-spawning tool. The CLI binary contains
+  // both strings as alternate identifiers; matching only one of them leaves
+  // sub-agents without the ability to spawn further workers depending on
+  // which name the CLI uses internally for allowlist matching. List both.
   "Agent",
+  "Task",
   "mcp__slack__slack_post_message",
   "mcp__slack__slack_post_file",
   "mcp__workdir__get_workdir",
