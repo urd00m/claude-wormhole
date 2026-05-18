@@ -14,10 +14,13 @@ TESTS=(
   src/agent/canUseTool.test.ts
   src/agent/subagentDepth.test.ts
   src/agent/recursiveAgents.test.ts
+  src/agent/spawnFlow.test.ts
+  src/agent/sessionStream.test.ts
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
   src/slack/taskEvents.test.ts
+  src/slack/sessionWiring.test.ts
   src/slack/download.test.ts
   src/slack/consent.test.ts
   src/scheduler/scheduler.test.ts

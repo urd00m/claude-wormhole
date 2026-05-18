@@ -1,5 +1,5 @@
 import { query, type CanUseTool, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { McpSdkServerConfigWithInstance, Query } from "@anthropic-ai/claude-agent-sdk";
 import { env } from "../config.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import {
@@ -73,11 +73,23 @@ export type StreamHooks = {
   onTaskEvent?: (event: TaskEvent) => void;
 };
 
+/**
+ * Shape of the SDK's `query` export, minus the parts we don't use. Carved
+ * out so tests can inject a fake — the real `query` opens a CLI subprocess
+ * which is not viable in unit tests.
+ */
+export type QueryFn = (params: {
+  prompt: string | AsyncIterable<unknown>;
+  options?: Record<string, unknown>;
+}) => AsyncIterable<SDKMessage> | Query;
+
 type SessionOpts = {
   threadKey: string;
   workdir: string;
   canUseTool?: CanUseTool;
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+  /** Test seam — defaults to the real SDK `query`. */
+  queryFn?: QueryFn;
 };
 
 /**
@@ -131,12 +143,14 @@ export class Session {
   private canUseTool?: CanUseTool;
   private mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
   private hasStarted = false;
+  private readonly queryFn: QueryFn;
 
   constructor(opts: SessionOpts) {
     this.threadKey = opts.threadKey;
     this.workdir = opts.workdir;
     this.canUseTool = opts.canUseTool;
     this.mcpServers = opts.mcpServers;
+    this.queryFn = opts.queryFn ?? (query as unknown as QueryFn);
   }
 
   setMcpServers(servers: Record<string, McpSdkServerConfigWithInstance>): void {
@@ -202,7 +216,7 @@ export class Session {
       return { behavior: "allow", updatedInput: effectiveInput };
     };
 
-    const q = query({
+    const q = this.queryFn({
       prompt,
       options: {
         cwd: this.workdir,
