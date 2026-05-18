@@ -100,6 +100,11 @@ const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").
       "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Has the full Claude Code tool surface including Bash and the Agent tool, so it can spawn further sub-agents up to a depth cap.",
     prompt: SUBAGENT_PROMPT,
     tools: [...SUBAGENT_TOOL_ALLOWLIST],
+    // Same reasoning as the top-level options: rely on the parent's
+    // canUseTool (which propagates with agentID set) for policy, not the
+    // CLI's internal gates which would otherwise auto-deny when no
+    // interactive client is present.
+    permissionMode: "bypassPermissions",
   },
   [BACKGROUND_WORKER_TYPE]: {
     description:
@@ -107,6 +112,7 @@ const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").
     prompt: BACKGROUND_WORKER_PROMPT,
     tools: [...SUBAGENT_TOOL_ALLOWLIST],
     background: true,
+    permissionMode: "bypassPermissions",
   },
 };
 
@@ -201,6 +207,29 @@ export class Session {
         mcpServers: this.mcpServers,
         // Surface token-level deltas so the Slack message updates as the agent writes.
         includePartialMessages: true,
+        // Skip the CLI's built-in permission layer entirely. Its internal
+        // gates (workingDir checks for paths outside cwd, classifier-based
+        // "ask user" escalations) auto-deny when there is no interactive
+        // TTY client to confirm — which is the wormhole's situation, since
+        // the Slack thread is the user interface, not a stdin prompt.
+        // Without this, sub-agents running `python3 /some/repo/tool.py` or
+        // even `python3 --version` from /tmp can be auto-denied before
+        // canUseTool is even consulted.
+        //
+        // Safety is preserved through `wrappedCanUseTool` above: it still
+        // routes destructive Bash through the consent flow and enforces
+        // the sub-agent depth cap / blocked MCP mutators. The wormhole
+        // user has explicitly invited a bot with shell access; the
+        // canUseTool gate is the right place to enforce policy, not the
+        // CLI's interactive-prompt machinery.
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Grant filesystem visibility beyond the per-thread workdir so
+        // working-dir-escape checks don't trip on paths the user genuinely
+        // intended (e.g. `python3 ~/code/myrepo/tool.py` from a sandbox
+        // thread). The bot has the user's full ambient permissions; the
+        // wormhole is not a sandbox.
+        additionalDirectories: ["/"],
         env: buildChildEnv(),
       },
     });
