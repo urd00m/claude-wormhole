@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { query, type CanUseTool, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance, Query } from "@anthropic-ai/claude-agent-sdk";
 import { env } from "../config.js";
@@ -147,6 +148,20 @@ export class Session {
   private canUseTool?: CanUseTool;
   private mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
   private hasStarted = false;
+  /**
+   * Stable SDK conversation identifier for THIS thread. Generated once at
+   * construction (rotated on setWorkdir). Used as `sessionId` on the first
+   * send and as `resume` on subsequent sends.
+   *
+   * Why: the SDK's `continue: true` option resumes "the most recent
+   * conversation in the current directory" — a cwd-based lookup. When two
+   * Slack threads `set_workdir` to the same path (e.g. both pointing at
+   * ~/code/myrepo), `continue: true` from thread B could resume thread A's
+   * latest conversation. Pinning a UUID per-thread eliminates that
+   * cross-talk: each thread resumes ITS OWN session by ID, regardless of
+   * cwd collisions.
+   */
+  private sessionId: string;
   private readonly queryFn: QueryFn;
 
   constructor(opts: SessionOpts) {
@@ -155,6 +170,7 @@ export class Session {
     this.canUseTool = opts.canUseTool;
     this.mcpServers = opts.mcpServers;
     this.queryFn = opts.queryFn ?? (query as unknown as QueryFn);
+    this.sessionId = randomUUID();
   }
 
   setMcpServers(servers: Record<string, McpSdkServerConfigWithInstance>): void {
@@ -167,13 +183,22 @@ export class Session {
 
   /**
    * Switch the working directory for subsequent agent runs. Resets the
-   * session-continue flag so the SDK starts fresh in the new directory
-   * (CLAUDE.md and other project context will be reloaded).
+   * session-continue flag AND rotates the sessionId so the SDK starts a
+   * truly fresh conversation in the new directory rather than trying to
+   * resume the prior one (which had a different cwd / different CLAUDE.md
+   * / different project context).
    */
   setWorkdir(newWorkdir: string): void {
     if (newWorkdir === this.workdir) return;
     this.workdir = newWorkdir;
     this.hasStarted = false;
+    this.sessionId = randomUUID();
+  }
+
+  /** Force the next send to start a fresh SDK conversation. Public reset hook. */
+  resetConversation(): void {
+    this.hasStarted = false;
+    this.sessionId = randomUUID();
   }
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
@@ -220,6 +245,13 @@ export class Session {
       return { behavior: "allow", updatedInput: effectiveInput };
     };
 
+    // Pin THIS thread's conversation to its own SDK session_id. On the
+    // first send we set `sessionId` (start fresh with our chosen UUID);
+    // on subsequent sends we set `resume: sessionId` (continue our own
+    // session by ID, NOT by cwd-most-recent). This eliminates cross-thread
+    // bleed when multiple Slack threads happen to share a workdir.
+    const sessionIdField = this.hasStarted ? { resume: this.sessionId } : { sessionId: this.sessionId };
+
     const q = this.queryFn({
       prompt,
       options: {
@@ -228,8 +260,7 @@ export class Session {
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         agents: RECURSIVE_AGENTS,
-        // Continue the prior session for this thread once we've started one.
-        continue: this.hasStarted,
+        ...sessionIdField,
         canUseTool: wrappedCanUseTool,
         mcpServers: this.mcpServers,
         // Surface token-level deltas so the Slack message updates as the agent writes.
