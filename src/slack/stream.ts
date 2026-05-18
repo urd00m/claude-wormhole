@@ -4,16 +4,20 @@ import { toMrkdwn } from "./formatter.js";
 const MIN_EDIT_INTERVAL_MS = 1000;
 const PLACEHOLDER = "_thinking…_";
 
+type ToolStatus = "running" | "ok" | "err";
+type ToolCall = { id: string; name: string; status: ToolStatus };
+
 /**
  * Streams an assistant reply into a single Slack message, throttled to one
  * chat.update per second (Slack tier-3 cap is ~50/min/channel).
  *
- * Usage:
- *   const s = new SlackStreamer(client, channel, thread_ts);
- *   await s.open();
- *   s.appendText("hello "); s.appendText("world");
- *   s.toolStart("Bash"); s.toolEnd("Bash", true);
- *   await s.finalize();
+ * Layout:
+ *   _✅ Bash · ✅ Read · 🔧 Edit_   ← single collapsed status line (if any tool calls)
+ *
+ *   <agent's actual text here>
+ *
+ * Tool calls are keyed by tool_use_id so completions update the right entry
+ * even when many tools run in parallel.
  */
 export class SlackStreamer {
   private readonly client: WebClient;
@@ -22,7 +26,8 @@ export class SlackStreamer {
 
   private messageTs: string | null = null;
   private textBuffer = "";
-  private toolLines: string[] = [];
+  private readonly toolsByOrder: ToolCall[] = [];
+  private readonly toolsById = new Map<string, ToolCall>();
   private lastEditAt = 0;
   private pendingTimer: NodeJS.Timeout | null = null;
   private closed = false;
@@ -53,22 +58,28 @@ export class SlackStreamer {
     this.scheduleFlush();
   }
 
-  toolStart(name: string): void {
-    this.toolLines.push(`_🔧 ${name}…_`);
+  toolStart(id: string, name: string): void {
+    if (this.toolsById.has(id)) return;
+    const call: ToolCall = { id, name, status: "running" };
+    this.toolsById.set(id, call);
+    this.toolsByOrder.push(call);
     this.scheduleFlush();
   }
 
-  toolEnd(name: string, ok: boolean): void {
-    // Replace the most recent matching line, if any
-    const marker = `_🔧 ${name}…_`;
-    const idx = this.toolLines.lastIndexOf(marker);
-    const replacement = ok ? `_✅ ${name}_` : `_❌ ${name}_`;
-    if (idx >= 0) this.toolLines[idx] = replacement;
-    else this.toolLines.push(replacement);
+  toolEnd(id: string, ok: boolean): void {
+    const call = this.toolsById.get(id);
+    if (call) {
+      call.status = ok ? "ok" : "err";
+    } else {
+      // tool_use_id wasn't seen on start (shouldn't happen normally); append
+      // a placeholder so the result still surfaces.
+      const placeholder: ToolCall = { id, name: "?", status: ok ? "ok" : "err" };
+      this.toolsById.set(id, placeholder);
+      this.toolsByOrder.push(placeholder);
+    }
     this.scheduleFlush();
   }
 
-  /** Force a final flush (no throttling) and disable further edits. */
   async finalize(): Promise<void> {
     this.closed = true;
     if (this.pendingTimer) {
@@ -78,7 +89,6 @@ export class SlackStreamer {
     await this.flushNow();
   }
 
-  /** Replace the message with an error, no streaming format. */
   async fail(err: unknown): Promise<void> {
     this.closed = true;
     if (this.pendingTimer) clearTimeout(this.pendingTimer);
@@ -95,10 +105,16 @@ export class SlackStreamer {
     }
   }
 
+  private renderToolsLine(): string {
+    if (this.toolsByOrder.length === 0) return "";
+    const parts = this.toolsByOrder.map((c) => `${iconFor(c.status)} ${c.name}`);
+    return `_${parts.join(" · ")}_`;
+  }
+
   private render(): string {
+    const tools = this.renderToolsLine();
     const body = toMrkdwn(this.textBuffer);
-    const tools = this.toolLines.join("\n");
-    const parts = [body, tools].filter(Boolean);
+    const parts = [tools, body].filter(Boolean);
     return parts.join("\n\n") || PLACEHOLDER;
   }
 
@@ -131,5 +147,16 @@ export class SlackStreamer {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[stream] chat.update failed: ${msg}`);
     }
+  }
+}
+
+function iconFor(status: ToolStatus): string {
+  switch (status) {
+    case "running":
+      return "🔧";
+    case "ok":
+      return "✅";
+    case "err":
+      return "❌";
   }
 }

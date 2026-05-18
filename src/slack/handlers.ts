@@ -116,8 +116,8 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         { text: msg.text, attachments },
         {
           onText: (chunk) => streamer.appendText(chunk),
-          onToolStart: (tool) => streamer.toolStart(tool),
-          onToolEnd: (tool, ok) => streamer.toolEnd(tool, ok),
+          onToolStart: (id, name) => streamer.toolStart(id, name),
+          onToolEnd: (id, ok) => streamer.toolEnd(id, ok),
           // Replace the streamed buffer with the SDK's canonical final text.
           // This is the authoritative response and works even if no token
           // deltas were emitted.

@@ -61,8 +61,8 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
           { text: entry.prompt },
           {
             onText: (chunk) => streamer.appendText(chunk),
-            onToolStart: (tool) => streamer.toolStart(tool),
-            onToolEnd: (tool, ok) => streamer.toolEnd(tool, ok),
+            onToolStart: (id, name) => streamer.toolStart(id, name),
+            onToolEnd: (id, ok) => streamer.toolEnd(id, ok),
             onFinal: (text) => streamer.setText(text),
           },
         );

@@ -14,8 +14,9 @@ export type SessionOutput = {
 
 export type StreamHooks = {
   onText?: (chunk: string) => void;
-  onToolStart?: (tool: string, input: Record<string, unknown>) => void;
-  onToolEnd?: (tool: string, ok: boolean) => void;
+  /** `id` is the SDK's tool_use_id; pair with onToolEnd for matching. */
+  onToolStart?: (id: string, name: string, input: Record<string, unknown>) => void;
+  onToolEnd?: (id: string, ok: boolean) => void;
   /** Called once with the canonical final text after the agent finishes. */
   onFinal?: (text: string) => void;
 };
@@ -102,7 +103,7 @@ export class Session {
             } else if (block.type === "tool_use") {
               if (!seenToolStarts.has(block.id)) {
                 seenToolStarts.add(block.id);
-                hooks.onToolStart?.(block.name, (block.input ?? {}) as Record<string, unknown>);
+                hooks.onToolStart?.(block.id, block.name, (block.input ?? {}) as Record<string, unknown>);
               }
             }
           }
@@ -115,7 +116,9 @@ export class Session {
             for (const block of content) {
               if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
                 const tr = block as { tool_use_id?: string; is_error?: boolean };
-                hooks.onToolEnd?.("", !tr.is_error);
+                if (tr.tool_use_id) {
+                  hooks.onToolEnd?.(tr.tool_use_id, !tr.is_error);
+                }
               }
             }
           }
