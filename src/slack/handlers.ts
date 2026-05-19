@@ -11,6 +11,7 @@ import { buildSpawnMcp } from "../agent/tools/spawn.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
+import { markActive } from "./activeMarker.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -72,7 +73,10 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
 
   const replyThreadTs = msg.thread_ts ?? msg.ts;
   const key = threadKeyOf(msg.channel, replyThreadTs);
-  const entry = await sessions.get(key);
+  const { entry, created } = await sessions.get(key);
+  if (created) {
+    void markActive(client, msg.channel, replyThreadTs);
+  }
 
   await entry.enqueue(async () => {
     const heartbeat = new Heartbeat({ client, channel: msg.channel, ts: msg.ts });

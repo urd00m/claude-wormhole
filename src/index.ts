@@ -6,6 +6,7 @@ import { detectAuth, describeAuth } from "./auth.js";
 import { getCronStore } from "./scheduler/store.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { makeRunner } from "./scheduler/runner.js";
+import { clearAllOnBoot } from "./slack/activeMarker.js";
 
 async function main() {
   const auth = detectAuth();
@@ -28,6 +29,14 @@ async function main() {
   });
   scheduler = new Scheduler(getCronStore(), runner);
   setSchedulerForHandlers(scheduler);
+
+  try {
+    await clearAllOnBoot(app.client);
+  } catch (err) {
+    console.warn(
+      `[boot] clearAllOnBoot failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   registerHandlers(app);
   registerInteractions(app);
