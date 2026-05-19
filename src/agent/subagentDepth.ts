@@ -1,4 +1,13 @@
 /**
+ * @deprecated Native Agent/Task is disabled at the canUseTool gate
+ * (see `REDIRECTED_SPAWN_TOOLS` in canUseTool.ts); all sub-agent creation
+ * is routed through `mcp__spawn__spawn`. This constant, the
+ * `RECURSIVE_AGENTS` definitions that reference it, `rewriteSpawnInput`,
+ * `isSpawnTool`, `computeChildDepth`, `SUBAGENT_TOOLS`, and
+ * `SUBAGENT_DISALLOWED_TOOLS` below are retained so the historical wiring
+ * stays buildable but are unreachable in normal operation. Do not add new
+ * callers.
+ *
  * Sub-agent type name for fire-and-forget background workers. Used in two
  * places: (1) the AgentDefinition registered in session.ts under this key,
  * (2) the rewrite below that translates `run_in_background: true` into a
@@ -23,6 +32,11 @@ export const BACKGROUND_WORKER_TYPE = "background-worker";
 export const MAX_SUBAGENT_DEPTH = 10;
 
 /**
+ * @deprecated Use `REDIRECTED_SPAWN_TOOLS` in canUseTool.ts. Kept so the
+ * dead branch in `Session.send`'s `wrappedCanUseTool` (which is now
+ * unreachable for Agent/Task because the canUseTool gate denies first)
+ * still compiles.
+ *
  * The sub-agent-spawning tool has been named both `Agent` (current Claude
  * Code / Agent SDK) and `Task` (older naming). Match either so depth
  * tracking and the cap fire regardless of which surface the SDK exposes.
@@ -61,6 +75,7 @@ export function isSpawnTool(name: string): boolean {
  *   - mcp__workdir__set_workdir / reset_workdir
  *   - mcp__cron__cron_add / cron_remove
  */
+/** @deprecated Referenced only by the deprecated `RECURSIVE_AGENTS`. */
 export const SUBAGENT_TOOLS: readonly string[] = [
   "Bash",
   "Read",
@@ -87,6 +102,7 @@ export const SUBAGENT_TOOLS: readonly string[] = [
  * passing them via `disallowedTools` as well ensures they stay blocked
  * even if a future refactor moves to inherit-and-subtract.
  */
+/** @deprecated Referenced only by the deprecated `RECURSIVE_AGENTS`. */
 export const SUBAGENT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__workdir__set_workdir",
   "mcp__workdir__reset_workdir",
@@ -129,6 +145,13 @@ export const SUBAGENT_DISALLOWED_TOOLS: readonly string[] = [
  * string "true" (some clients stringify booleans on tool calls). Anything
  * else is treated as not-background.
  */
+/**
+ * @deprecated Native Agent/Task is denied at the canUseTool gate, so this
+ * rewrite (which translates `run_in_background: true` into
+ * `subagent_type: "background-worker"` for the SDK's Agent tool) is no
+ * longer reached. The spawn MCP accepts `background`/`run_in_background`
+ * directly and does its own dispatch.
+ */
 export function rewriteSpawnInput(
   input: Record<string, unknown>,
 ): { input: Record<string, unknown>; isBackground: boolean } {
@@ -149,6 +172,12 @@ export function rewriteSpawnInput(
   return { input: rewritten, isBackground: true };
 }
 
+/**
+ * @deprecated Depth bookkeeping for native Agent/Task is unreachable now
+ * (deny at the canUseTool gate fires first). Spawn-MCP depth is tracked
+ * via the `depth` field on `SpawnCtx` in tools/spawn.ts, not through
+ * tool_use_ids.
+ */
 export function computeChildDepth(
   parentToolUseId: string | null,
   childDepths: Map<string, number>,

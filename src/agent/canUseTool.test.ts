@@ -54,4 +54,21 @@ for (const t of [
   assert(d.kind === "allow", `safe bash must allow, got ${d.kind}`);
 }
 
+// Native Agent/Task → deny with a message pointing the model at spawn.
+// Fires at every layer (main agent AND sub-agent), so this is the harness's
+// single enforcement point for the spawn-only policy.
+for (const agentId of [undefined, SUB]) {
+  for (const t of ["Agent", "Task"]) {
+    const d = classifyCall(t, { prompt: "do something" }, agentId);
+    assert(
+      d.kind === "deny",
+      `${t} (agentID=${agentId ?? "main"}) must deny, got ${d.kind}`,
+    );
+    assert(
+      d.kind === "deny" && d.reason.includes("mcp__spawn__spawn"),
+      `${t} deny message must mention mcp__spawn__spawn, got: ${d.kind === "deny" ? d.reason : ""}`,
+    );
+  }
+}
+
 console.log("✅ canUseTool gating verified");

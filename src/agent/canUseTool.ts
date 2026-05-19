@@ -22,6 +22,20 @@ const SUBAGENT_BLOCKED_TOOLS = new Set([
   "mcp__cron__cron_remove",
 ]);
 
+/**
+ * Native sub-agent-spawning tool names. The harness routes ALL sub-agent
+ * creation through `mcp__spawn__spawn` instead. We deny these names at the
+ * canUseTool gate with a redirect message — the model sees the deny in the
+ * tool_result and retries against spawn. Lives here (not in subagentDepth.ts)
+ * because (a) this is the enforcement point and (b) subagentDepth.ts's
+ * isSpawnTool is now deprecated; we don't want the policy decision to depend
+ * on a deprecated symbol.
+ */
+const REDIRECTED_SPAWN_TOOLS = new Set(["Agent", "Task"]);
+
+const SPAWN_REDIRECT_MESSAGE =
+  "Agent/Task is disabled in this harness. Use `mcp__spawn__spawn` instead — same purpose, accepts `{ prompt: string, description?: string, background?: boolean }`. Multiple spawn calls in one assistant turn run in parallel; set `background: true` for fire-and-forget.";
+
 export type Gate = (
   toolName: string,
   input: Record<string, unknown>,
@@ -37,6 +51,12 @@ export function classifyCall(
   input: Record<string, unknown>,
   agentID: string | undefined,
 ): ReturnType<Gate> {
+  // Harness enforcement: native sub-agent spawn tools are redirected to
+  // the spawn MCP. Applies at every layer (main thread and sub-agents)
+  // because the same buildCanUseTool is wired for both.
+  if (REDIRECTED_SPAWN_TOOLS.has(toolName)) {
+    return { kind: "deny", reason: SPAWN_REDIRECT_MESSAGE };
+  }
   if (agentID && SUBAGENT_BLOCKED_TOOLS.has(toolName)) {
     return { kind: "deny", reason: `${toolName} is not available to sub-agents` };
   }

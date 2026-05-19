@@ -71,7 +71,7 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
 
   const spawnTool = tool(
     "spawn",
-    `Spawn a worker sub-agent for parallel or context-isolated work. This is the wormhole's workaround for the CLI's hardcoded Agent/Task strip on sub-agents — unlike Agent, calling this tool from a sub-agent works. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Current spawn-MCP depth: ${myDepth}.`,
+    `Spawn a worker sub-agent for parallel or context-isolated work. This is the ONLY sub-agent dispatch path in this harness — native Agent/Task tool calls are denied at the canUseTool gate and redirected here. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Current spawn-MCP depth: ${myDepth}.`,
     {
       prompt: z
         .string()

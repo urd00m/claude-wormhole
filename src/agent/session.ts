@@ -95,6 +95,11 @@ type SessionOpts = {
 };
 
 /**
+ * @deprecated Native Agent/Task is denied at the canUseTool gate
+ * (see `REDIRECTED_SPAWN_TOOLS` in canUseTool.ts); these AgentDefinitions
+ * are never invoked in normal operation. Retained so the SDK options
+ * shape and historical behavior stay buildable for reference / rollback.
+ *
  * Override the built-in `general-purpose` sub-agent so it gets the full tool
  * surface — Bash, file tools, web tools, AND the spawning tool (`Agent`),
  * which the SDK's default for unconfigured `general-purpose` omits as a
@@ -109,16 +114,11 @@ const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a paren
 
 const BACKGROUND_WORKER_PROMPT = `You are a background sub-agent. Your invocation returned to the parent immediately — the parent is NOT waiting on your tool_result. Do the work, then write your final report to the file path provided by the SDK (or to a file in the working directory, mentioned in your final summary). The parent will see your completion via a task-notification event in its Slack thread. You have the full tool surface; nested-Agent depth is bounded at ${MAX_SUBAGENT_DEPTH}. Be self-contained — the parent has no way to ask you follow-ups, so commit any context you need into your summary.`;
 
-// IMPORTANT: `tools` is set EXPLICITLY on each AgentDefinition — including
-// "Agent" and "Task". The earlier "omit tools to inherit from parent"
-// approach failed in practice because the CLI silently strips the
-// spawning tool from inherited surfaces as an anti-recursion safety. The
-// live integration test `scripts/it.sh toolSurface` confirmed: with
-// `tools` omitted, the sub-agent's reported surface contained every
-// preset tool (Bash, Read, Write, Edit, Grep, Glob, web tools, etc.)
-// EXCEPT Agent/Task. Listing the spawn tool names here overrides the
-// auto-strip. Recursion is bounded by MAX_SUBAGENT_DEPTH in canUseTool,
-// so this is safe.
+/**
+ * @deprecated See note above. Spawn-MCP is the only active sub-agent
+ * dispatch path; RECURSIVE_AGENTS is still passed to `query` for shape
+ * compatibility but is never reached because Agent/Task is denied.
+ */
 const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").AgentDefinition> = {
   "general-purpose": {
     description:
@@ -212,10 +212,14 @@ export class Session {
 
     const wrappedCanUseTool: CanUseTool = async (toolName, toolInput, options) => {
       let effectiveInput = toolInput;
+      // DEPRECATED: this branch handles depth-capping and run_in_background
+      // rewriting for native Agent/Task calls. Native Agent/Task is now
+      // denied earlier by `buildCanUseTool` (REDIRECTED_SPAWN_TOOLS), so
+      // the branch is unreachable in normal operation. Kept (a) so the
+      // historical wiring stays buildable and reviewable, (b) as a
+      // belt-and-suspenders depth cap if someone ever re-enables Agent
+      // without re-thinking the gate.
       if (isSpawnTool(toolName)) {
-        // childDepthByToolUseId is populated when we see the issuing assistant
-        // message. If the entry is missing (race with our async iterator),
-        // default to 1 so we never spuriously deny the first level.
         const childDepth = childDepthByToolUseId.get(options.toolUseID) ?? 1;
         if (childDepth > MAX_SUBAGENT_DEPTH) {
           return {
@@ -223,12 +227,6 @@ export class Session {
             message: `sub-agent depth ${childDepth} exceeds cap ${MAX_SUBAGENT_DEPTH}`,
           };
         }
-        // Translate Claude-Code-style `run_in_background: true` into our
-        // background-worker subagent_type. The SDK's Agent tool input
-        // schema has no run_in_background field, so without this rewrite
-        // the flag would be silently dropped and the call would run
-        // blocking. Also re-tag for lifecycle-event surfacing in case the
-        // model only set the flag and not subagent_type.
         const { input: rewritten, isBackground } = rewriteSpawnInput(toolInput);
         effectiveInput = rewritten;
         if (isBackground) backgroundToolUseIds.add(options.toolUseID);
