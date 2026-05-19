@@ -1,5 +1,9 @@
 # TODO
 
+## Priority
+
+- [ ] **Caveman skill** — add to the harness: <https://github.com/JuliusBrussee/caveman>
+
 ## v1 — Single-workspace prototype (scope of initial build)
 
 - [ ] Bolt app boots in Socket Mode with `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN`
