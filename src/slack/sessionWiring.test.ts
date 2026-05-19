@@ -59,26 +59,40 @@ for (const site of SITES) {
     `${site.label}: expected a \`.session.send(...)\` call`,
   );
 
-  // 3. That .send() call passes an onTaskEvent hook backed by
-  //    buildTaskEventPoster. We're not parsing TS, so use a permissive
-  //    regex spanning multiple lines.
-  const onTaskRe = /onTaskEvent\s*:\s*buildTaskEventPoster\s*\(/;
+  // 3. The file passes `onTaskEvent: <value>` and `<value>` is backed by
+  //    buildTaskEventPoster — either inline (`onTaskEvent:
+  //    buildTaskEventPoster(...)`) or via a hoisted local
+  //    (`const x = buildTaskEventPoster(...); ... onTaskEvent: x`). Both
+  //    patterns wire the same callback through and both ship in this
+  //    repo, so we accept either. Without a TS parser this is regex-based
+  //    and permissive — the goal is catching the regression where the
+  //    hook is dropped entirely or pointed at a different factory.
+  // Prefer the inline-call alternative first so a name like
+  // `buildTaskEventPosterFoo` can't slip past the strict prefix check
+  // below.
+  const onTaskRe = /onTaskEvent\s*:\s*(buildTaskEventPoster\s*\(|[A-Za-z_$][\w$]*)/g;
+  const matches = [...src.matchAll(onTaskRe)];
   assert(
-    onTaskRe.test(src),
-    `${site.label}: \`.send(...)\` must pass \`onTaskEvent: buildTaskEventPoster(...)\`. ` +
+    matches.length > 0,
+    `${site.label}: \`.send(...)\` must pass an \`onTaskEvent:\` hook. ` +
       `Regression risk: refactors have repeatedly dropped this hook, silently breaking background-task completion posts.`,
   );
-
-  // 4. The onTaskEvent line should appear inside (or just after) the
-  // hooks object that follows the session.send call. Sanity-check that
-  // buildTaskEventPoster appears AFTER the send call — guards against a
-  // dangling import with no use site.
-  const sendIdx = src.search(/\.session\.send\s*\(/);
-  const posterIdx = src.search(/buildTaskEventPoster\s*\(/);
-  assert(
-    posterIdx > sendIdx,
-    `${site.label}: buildTaskEventPoster(...) call must appear at/after the session.send call (got send @${sendIdx}, poster @${posterIdx})`,
-  );
+  for (const m of matches) {
+    const rhs = m[1];
+    // Inline-call alternative ALWAYS includes the trailing `(` — strict
+    // prefix match defends against `buildTaskEventPosterButDifferent(...)`.
+    if (rhs.startsWith("buildTaskEventPoster(") || rhs.startsWith("buildTaskEventPoster (")) continue;
+    // Hoisted identifier: require a binder `(const|let|var) <rhs> = buildTaskEventPoster(`.
+    const escaped = rhs.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const binderRe = new RegExp(
+      `\\b(?:const|let|var)\\s+${escaped}\\s*=\\s*buildTaskEventPoster\\s*\\(`,
+    );
+    assert(
+      binderRe.test(src),
+      `${site.label}: \`onTaskEvent: ${rhs}\` references identifier \`${rhs}\` but no \`const ${rhs} = buildTaskEventPoster(...)\` binder appears in the same file. ` +
+        `If this hook is wired to a different factory, background sub-agent lifecycle events will not reach the Slack thread.`,
+    );
+  }
 }
 
 console.log(`✅ session wiring verified — onTaskEvent passed through at ${SITES.length} call sites`);

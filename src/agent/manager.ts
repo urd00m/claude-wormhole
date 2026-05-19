@@ -75,6 +75,18 @@ export class SessionManager {
   has(key: ThreadKey): boolean {
     return this.entries.has(key);
   }
+
+  /**
+   * Drop the in-memory session entry for `key`. Returns true if an entry was
+   * removed, false if none existed. The next message in that thread will
+   * spin up a fresh session (created=true). `close` does not interrupt
+   * in-flight work — the orphaned entry's queue continues running on its
+   * own reference; this only prevents future messages from being routed
+   * back to that same session.
+   */
+  close(key: ThreadKey): boolean {
+    return this.entries.delete(key);
+  }
 }
 
 export const sessions = new SessionManager();

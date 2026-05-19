@@ -56,6 +56,16 @@ async function main() {
   const elapsed = Date.now() - t0;
   assert(elapsed < 90, `parallel threads should finish in <90ms, took ${elapsed}ms`);
 
+  // close() drops the entry; next get() returns a fresh instance with created=true.
+  const closed = mgr.close(keyA);
+  assert(closed === true, "close on existing key returns true");
+  assert(mgr.has(keyA) === false, "close removes the entry");
+  const closedAgain = mgr.close(keyA);
+  assert(closedAgain === false, "close on missing key returns false");
+  const a3Res = await mgr.get(keyA);
+  assert(a3Res.entry !== a1, "post-close get returns a fresh SessionEntry");
+  assert(a3Res.created === true, "post-close get reports created=true");
+
   console.log("✅ session manager verification passed");
 }
 
