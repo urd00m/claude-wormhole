@@ -20,6 +20,7 @@ Think of it as Claude Code in your DMs.
 - **Sub-agents** — the agent can spawn sub-agents (via the SDK's `Task` tool) for parallel or context-isolated work.
 - **Scheduled runs (cron)** — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` and project context. Per-thread, persistent across restarts.
+- **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately, without waiting for idle timeout. The next message in that thread starts fresh.
 
 ---
 
