@@ -11,13 +11,19 @@ async function main() {
   const keyB = threadKeyOf("C1", "T2");
 
   // Same key → same session instance
-  const a1 = await mgr.get(keyA);
-  const a2 = await mgr.get(keyA);
+  const a1Res = await mgr.get(keyA);
+  const a2Res = await mgr.get(keyA);
+  const a1 = a1Res.entry;
+  const a2 = a2Res.entry;
   assert(a1 === a2, "same thread key must return same SessionEntry");
+  assert(a1Res.created === true, "first get must report created=true");
+  assert(a2Res.created === false, "second get must report created=false");
 
   // Different keys → different sessions
-  const b = await mgr.get(keyB);
+  const bRes = await mgr.get(keyB);
+  const b = bRes.entry;
   assert(a1 !== b, "different thread keys must return distinct SessionEntries");
+  assert(bRes.created === true, "new key must report created=true");
 
   // Per-thread queue: rapid enqueues on the same thread serialize
   const log: string[] = [];

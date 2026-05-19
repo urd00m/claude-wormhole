@@ -53,22 +53,23 @@ class SessionEntry {
 export class SessionManager {
   private readonly entries = new Map<ThreadKey, SessionEntry>();
 
-  async get(key: ThreadKey): Promise<SessionEntry> {
-    let entry = this.entries.get(key);
-    if (!entry) {
-      const override = getWorkdirStore().get(key);
-      let workdir: string;
-      if (override) {
-        workdir = override;
-      } else {
-        const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
-        workdir = path.join(SESSIONS_DIR, safeKey);
-        await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
-      }
-      entry = new SessionEntry(new Session({ threadKey: key, workdir }));
-      this.entries.set(key, entry);
+  async get(key: ThreadKey): Promise<{ entry: SessionEntry; created: boolean }> {
+    const existing = this.entries.get(key);
+    if (existing) {
+      return { entry: existing, created: false };
     }
-    return entry;
+    const override = getWorkdirStore().get(key);
+    let workdir: string;
+    if (override) {
+      workdir = override;
+    } else {
+      const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
+      workdir = path.join(SESSIONS_DIR, safeKey);
+      await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
+    }
+    const entry = new SessionEntry(new Session({ threadKey: key, workdir }));
+    this.entries.set(key, entry);
+    return { entry, created: true };
   }
 
   has(key: ThreadKey): boolean {

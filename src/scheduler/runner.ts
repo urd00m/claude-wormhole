@@ -30,7 +30,7 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
 
     const threadTs = ts;
     const key = threadKeyOf(entry.channel, threadTs);
-    const sessionEntry = await sessions.get(key);
+    const { entry: sessionEntry } = await sessions.get(key);
 
     await sessionEntry.enqueue(async () => {
       const heartbeat = new Heartbeat({ client, channel: entry.channel, ts });
