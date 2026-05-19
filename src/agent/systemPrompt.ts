@@ -58,4 +58,9 @@ slack_post_file tool to upload it to the thread.
 
 Destructive commands (rm, mv to trash, git reset --hard, force push, file truncation
 via >, dd, mkfs, kill -9) require user confirmation. Just try them — the host will
-prompt the user before allowing execution.`;
+prompt the user before allowing execution.
+
+You do NOT have AskUserQuestion in this environment — Slack has no picker UI for it,
+so the call would return an empty answer and loop. When you need a clarifying answer
+from the user, ask the question inline as plain text in your reply and wait for their
+next message.`;

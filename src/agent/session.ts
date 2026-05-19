@@ -267,6 +267,12 @@ export class Session {
         model: env.ANTHROPIC_MODEL,
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
+        // AskUserQuestion ships a picker UI in interactive Claude Code, but
+        // the wormhole has no Slack surface for it: under bypassPermissions
+        // the CLI returns an empty answer and the model loops asking again
+        // ("Empty answer again"). Drop it from the model's tool surface;
+        // the system prompt tells the model to ask in plain text instead.
+        disallowedTools: ["AskUserQuestion"],
         agents: RECURSIVE_AGENTS,
         ...sessionIdField,
         canUseTool: wrappedCanUseTool,
