@@ -3,6 +3,12 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { WebClient } from "@slack/web-api";
 import { uploadFile } from "../../slack/upload.js";
+import { splitForSlack } from "../../slack/stream.js";
+
+// Slack's chat.postMessage `text` is capped at 40,000 chars and truncates
+// silently past that. Stay well under to leave headroom for fence rebalancing
+// when splitForSlack reopens code blocks across boundaries.
+const MAX_PART_CHARS = 38000;
 
 export type SlackContext = {
   client: WebClient;
@@ -12,21 +18,37 @@ export type SlackContext = {
 };
 
 /**
+ * Post a (possibly long) message to a Slack thread, splitting at
+ * MAX_PART_CHARS so each chunk stays under Slack's 40k cap and code fences
+ * stay balanced across boundaries. Returns the number of thread messages
+ * actually posted.
+ */
+export async function postSlackMessage(
+  client: WebClient,
+  channel: string,
+  threadTs: string,
+  text: string,
+): Promise<number> {
+  const parts = splitForSlack(text, MAX_PART_CHARS);
+  for (const part of parts) {
+    await client.chat.postMessage({ channel, thread_ts: threadTs, text: part });
+  }
+  return parts.length;
+}
+
+/**
  * Build an MCP server scoped to a single Slack thread so the agent (and
  * sub-agents) can post messages and upload files back into the conversation.
  */
 export function buildSlackMcp(ctx: SlackContext) {
   const postMessage = tool(
     "slack_post_message",
-    "Post a plain text message into the current Slack thread. Use for status updates or extra context.",
+    "Post a plain text message into the current Slack thread. Use for status updates or extra context. Long messages are auto-split into multiple thread posts (code fences preserved across splits).",
     { text: z.string().describe("Message text (Slack mrkdwn allowed).") },
     async ({ text }) => {
-      await ctx.client.chat.postMessage({
-        channel: ctx.channel,
-        thread_ts: ctx.threadTs,
-        text,
-      });
-      return { content: [{ type: "text", text: "posted" }] };
+      const n = await postSlackMessage(ctx.client, ctx.channel, ctx.threadTs, text);
+      const summary = n === 1 ? "posted" : `posted (${n} parts)`;
+      return { content: [{ type: "text", text: summary }] };
     },
   );
 

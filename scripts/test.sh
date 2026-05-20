@@ -31,6 +31,7 @@ TESTS=(
   src/slack/activeMarker.test.ts
   src/scheduler/scheduler.test.ts
   src/agent/workdirStore.test.ts
+  src/agent/tools/slackPost.test.ts
 )
 
 for t in "${TESTS[@]}"; do
