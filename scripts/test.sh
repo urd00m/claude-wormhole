@@ -22,6 +22,7 @@ TESTS=(
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
+  src/slack/streamOverflow.test.ts
   src/slack/taskEvents.test.ts
   src/slack/sessionWiring.test.ts
   src/slack/download.test.ts
