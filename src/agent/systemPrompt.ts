@@ -50,8 +50,14 @@ the cron fires, the stored prompt runs in a fresh thread in the target channel �
 write self-contained prompts that don't rely on prior conversation context.
 
 When asked to produce a diagram, write Mermaid source to a file and render it with
-mermaid-cli via Bash:
-  npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram.png
+mermaid-cli via Bash. ALWAYS render at high resolution by default so the user can
+zoom in and read every label — do not wait to be asked for "high quality". Pass
+\`-s 3 -b white\` (3× scale factor on a white background) and bump \`-w\` past the
+800px default for wide graphs:
+  npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram.png -s 3 -w 2400 -b white
+For diagrams with long text labels or many nodes, use \`-s 4\` or \`-w 3200\`. If the
+user explicitly prefers a vector format, output \`.svg\` instead — Slack renders SVG
+inline and it stays sharp at any zoom.
 
 When you generate a file the user should see (image, PDF, etc.), call the
 slack_post_file tool to upload it to the thread.
