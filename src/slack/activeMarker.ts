@@ -16,18 +16,31 @@ function queue(work: () => Promise<void>): Promise<void> {
   return next;
 }
 
+function dedupe(entries: IndexEntry[]): IndexEntry[] {
+  const seen = new Set<string>();
+  const out: IndexEntry[] = [];
+  for (const e of entries) {
+    const k = `${e.channel}|${e.threadTs}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(e);
+  }
+  return out;
+}
+
 async function readIndex(): Promise<IndexEntry[]> {
   try {
     const raw = await fs.readFile(INDEX_FILE, "utf8");
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
+    const valid = parsed.filter(
       (x): x is IndexEntry =>
         !!x &&
         typeof x === "object" &&
         typeof (x as IndexEntry).channel === "string" &&
         typeof (x as IndexEntry).threadTs === "string",
     );
+    return dedupe(valid);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return [];
@@ -95,9 +108,17 @@ export async function unmarkActive(
   });
 }
 
+/**
+ * On boot, attempt to remove the :satellite_antenna: reaction for every
+ * indexed thread. Entries whose removal succeeded (or whose reaction was
+ * already gone) are dropped from the index. Entries whose removal failed
+ * with a recoverable Slack error are kept so the next boot can retry,
+ * preventing orphan reactions when the API hiccups during cleanup.
+ */
 export async function clearAllOnBoot(client: WebClient): Promise<void> {
   await queue(async () => {
     const entries = await readIndex();
+    const retained: IndexEntry[] = [];
     for (const e of entries) {
       try {
         await client.reactions.remove({
@@ -107,11 +128,31 @@ export async function clearAllOnBoot(client: WebClient): Promise<void> {
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (!msg.includes("no_reaction")) {
-          console.warn(`[activeMarker] clearAllOnBoot remove failed: ${msg}`);
+        if (msg.includes("no_reaction")) {
+          // Reaction already absent — entry is stale, drop it.
+          continue;
         }
+        // Permanent-shaped errors (bad message ts, deleted channel) won't
+        // recover on retry, so drop them too. Anything else is presumed
+        // transient and kept for the next boot.
+        if (
+          msg.includes("message_not_found") ||
+          msg.includes("channel_not_found") ||
+          msg.includes("thread_not_found") ||
+          msg.includes("invalid_name") ||
+          msg.includes("is_archived")
+        ) {
+          console.warn(
+            `[activeMarker] clearAllOnBoot dropping unrecoverable entry ${e.channel}/${e.threadTs}: ${msg}`,
+          );
+          continue;
+        }
+        console.warn(
+          `[activeMarker] clearAllOnBoot remove failed (will retry next boot): ${msg}`,
+        );
+        retained.push(e);
       }
     }
-    await writeIndex([]);
+    await writeIndex(retained);
   });
 }

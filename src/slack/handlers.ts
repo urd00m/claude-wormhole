@@ -12,6 +12,7 @@ import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
 import { markActive, unmarkActive } from "./activeMarker.js";
+import { isEndSessionPhrase } from "./endSessionMatcher.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -66,17 +67,6 @@ export function registerHandlers(app: App) {
 
 const inFlight = new Set<string>();
 
-/**
- * Strip a leading bot mention (`<@U123>`) and surrounding whitespace, then
- * lowercase. Used to detect control phrases regardless of whether the user
- * pinged the bot or typed in a thread where it's already engaged.
- */
-function normalizeForCommand(text: string): string {
-  return text.replace(/^\s*<@[^>]+>\s*/, "").trim().toLowerCase();
-}
-
-const END_SESSION_PHRASES = new Set(["/end", "/end-session", "end session", "close session"]);
-
 async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
   const dedupeKey = `${msg.channel}:${msg.ts}`;
   if (inFlight.has(dedupeKey)) return;
@@ -88,23 +78,20 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
   // Control phrase: explicit end-session. Short-circuits BEFORE sessions.get
   // so we never spin up (and then have to tear down) a fresh session — and
   // never race a just-added :satellite_antenna: against its own removal.
-  if (END_SESSION_PHRASES.has(normalizeForCommand(msg.text))) {
+  if (isEndSessionPhrase(msg.text)) {
     inFlight.delete(dedupeKey);
     const had = sessions.close(key);
-    if (had) {
-      await unmarkActive(client, msg.channel, replyThreadTs);
-      await client.chat.postMessage({
-        channel: msg.channel,
-        thread_ts: replyThreadTs,
-        text: "Session ended. The next message in this thread will start a fresh one.",
-      });
-    } else {
-      await client.chat.postMessage({
-        channel: msg.channel,
-        thread_ts: replyThreadTs,
-        text: "No active session in this thread.",
-      });
-    }
+    // Always clear the reaction — it can persist in Slack even when there's
+    // no in-memory session (e.g. after a bot restart where the index was
+    // already wiped but the Slack reaction removal failed transiently).
+    await unmarkActive(client, msg.channel, replyThreadTs);
+    await client.chat.postMessage({
+      channel: msg.channel,
+      thread_ts: replyThreadTs,
+      text: had
+        ? "Session ended. The next message in this thread will start a fresh one."
+        : "No active session in this thread (reaction cleared if present).",
+    });
     return;
   }
 

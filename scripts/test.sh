@@ -26,6 +26,8 @@ TESTS=(
   src/slack/sessionWiring.test.ts
   src/slack/download.test.ts
   src/slack/consent.test.ts
+  src/slack/endSessionMatcher.test.ts
+  src/slack/activeMarker.test.ts
   src/scheduler/scheduler.test.ts
   src/agent/workdirStore.test.ts
 )
