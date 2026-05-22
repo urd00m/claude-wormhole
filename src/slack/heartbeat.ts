@@ -33,6 +33,8 @@ export class Heartbeat {
   private timer: NodeJS.Timeout | null = null;
   private index = 0;
   private stopped = false;
+  /** Most recently kicked-off addNext promise (or null if none in flight). */
+  private inflight: Promise<void> | null = null;
 
   constructor(opts: HeartbeatOpts) {
     this.client = opts.client;
@@ -43,10 +45,16 @@ export class Heartbeat {
 
   /** Add the first emoji immediately and start the periodic rotation. */
   async start(): Promise<void> {
-    await this.addNext();
+    await this.kickAddNext();
     this.timer = setInterval(() => {
-      void this.addNext();
+      void this.kickAddNext();
     }, this.intervalMs);
+  }
+
+  private kickAddNext(): Promise<void> {
+    const p = this.addNext();
+    this.inflight = p;
+    return p;
   }
 
   private async addNext(): Promise<void> {
@@ -72,6 +80,19 @@ export class Heartbeat {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    // Wait for any addNext currently mid-await so it can either (a) bail on
+    // the post-await `this.stopped` check before pushing to `this.added`, or
+    // (b) reach the push and then self-clean by removing the reaction it
+    // just added. Without this, the in-flight tick would land its emoji
+    // AFTER we iterated `this.added`, leaving an orphan reaction.
+    if (this.inflight) {
+      try {
+        await this.inflight;
+      } catch {
+        /* swallow — addNext already logs */
+      }
+      this.inflight = null;
     }
     for (const name of this.added) {
       try {

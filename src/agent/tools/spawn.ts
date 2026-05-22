@@ -136,6 +136,12 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
               model: env.ANTHROPIC_MODEL,
               systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
               tools: { type: "preset", preset: "claude_code" },
+              // Workers run under bypassPermissions like the main agent, so
+              // AskUserQuestion would also death-loop here (CLI returns an
+              // empty answer with no picker UI, model re-asks forever). Match
+              // the main agent's mitigation: drop it from the worker's tool
+              // surface; the system prompt tells it to ask in plain text.
+              disallowedTools: ["AskUserQuestion"],
               canUseTool: ctx.buildCanUseTool(),
               mcpServers: workerMcpServers,
               permissionMode: "bypassPermissions",

@@ -41,6 +41,14 @@ export class SlackStreamer {
   private closed = false;
   private flushing = false;
   private flushAgain = false;
+  /**
+   * Tracks the currently-running flush so `finalize` can await it (and the
+   * follow-up flush triggered by `flushAgain`) before declaring the stream
+   * closed. Without this, the final `setText` issued by `onFinal` could be
+   * lost when its `flushAgain` got dropped by the do-while's `!this.closed`
+   * gate firing on a closed-during-flush state.
+   */
+  private currentFlush: Promise<void> | null = null;
 
   constructor(client: WebClient, channel: string, threadTs: string) {
     this.client = client;
@@ -89,12 +97,28 @@ export class SlackStreamer {
   }
 
   async finalize(): Promise<void> {
-    this.closed = true;
     if (this.pendingTimer) {
       clearTimeout(this.pendingTimer);
       this.pendingTimer = null;
     }
+    // Drain any in-flight flush BEFORE marking closed. If a flush is in
+    // progress and `setText`/`appendText` ran while it was awaiting (e.g.
+    // the SDK's onFinal hook firing during an in-flight chat.update), the
+    // queued `flushAgain` would be silently dropped by the do-while gate
+    // once `closed` flips true — causing the final buffer to never reach
+    // Slack and the user to see only an earlier, shorter version of the
+    // reply (which reads as "long messages cut off").
+    while (this.currentFlush) {
+      const cur = this.currentFlush;
+      await cur;
+      // If a new flush was scheduled while we awaited (cur was reassigned),
+      // loop and await that one too.
+      if (this.currentFlush === cur) break;
+    }
+    // Now do one final flush of the latest buffer state. This catches any
+    // setText that landed AFTER the last flushOnce captured render().
     await this.flushNow();
+    this.closed = true;
   }
 
   async fail(err: unknown): Promise<void> {
@@ -102,14 +126,30 @@ export class SlackStreamer {
     if (this.pendingTimer) clearTimeout(this.pendingTimer);
     if (this.messageTsList.length === 0) return;
     const msg = err instanceof Error ? err.message : String(err);
-    try {
-      await this.client.chat.update({
-        channel: this.channel,
-        ts: this.messageTsList[0],
-        text: `:warning: ${msg}`,
-      });
-    } catch {
-      /* swallow */
+    // Split the error text the same way normal output is split — stack
+    // traces and SDK error bodies can run past Slack's 40k cap and would
+    // otherwise be silently truncated by the API.
+    const text = `:warning: ${msg}`;
+    const parts = splitForSlack(text, MAX_PART_CHARS);
+    for (let i = 0; i < parts.length; i++) {
+      try {
+        if (i < this.messageTsList.length) {
+          await this.client.chat.update({
+            channel: this.channel,
+            ts: this.messageTsList[i],
+            text: parts[i],
+          });
+        } else {
+          const res = await this.client.chat.postMessage({
+            channel: this.channel,
+            thread_ts: this.threadTs,
+            text: parts[i],
+          });
+          if (res.ts) this.messageTsList.push(res.ts);
+        }
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -144,20 +184,34 @@ export class SlackStreamer {
   private async flushNow(): Promise<void> {
     if (this.messageTsList.length === 0) return;
     // Serialize concurrent flushes so we don't double-post continuation
-    // messages while the previous flush is still awaiting postMessage.
+    // messages while the previous flush is still awaiting postMessage. A
+    // newer scheduleFlush during an in-flight flush sets flushAgain so the
+    // current flusher loops once it returns from chat.update/postMessage.
     if (this.flushing) {
       this.flushAgain = true;
+      // Surface the in-flight flush so finalize can await it.
+      if (this.currentFlush) await this.currentFlush;
       return;
     }
     this.flushing = true;
-    try {
-      do {
-        this.flushAgain = false;
-        await this.flushOnce();
-      } while (this.flushAgain && !this.closed);
-    } finally {
-      this.flushing = false;
-    }
+    const work = (async () => {
+      try {
+        do {
+          this.flushAgain = false;
+          await this.flushOnce();
+          // NOTE: previously this gated on `!this.closed`, which dropped a
+          // flushAgain set during the final in-flight flush — finalize's
+          // setText would never reach Slack. closed is now flipped after
+          // finalize has drained everything, so the bare flushAgain check
+          // is sufficient.
+        } while (this.flushAgain);
+      } finally {
+        this.flushing = false;
+        this.currentFlush = null;
+      }
+    })();
+    this.currentFlush = work;
+    await work;
   }
 
   private async flushOnce(): Promise<void> {

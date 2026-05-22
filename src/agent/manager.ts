@@ -52,24 +52,46 @@ class SessionEntry {
 
 export class SessionManager {
   private readonly entries = new Map<ThreadKey, SessionEntry>();
+  /**
+   * In-flight creation promises keyed by ThreadKey. Without this, two
+   * messages arriving back-to-back for an unknown thread both miss the
+   * `entries` cache, both `await fs.mkdir`, both construct a `Session`,
+   * and the second `entries.set` clobbers the first — leaving the first
+   * caller streaming into an orphaned Session while subsequent messages
+   * route to the survivor.
+   */
+  private readonly creating = new Map<ThreadKey, Promise<SessionEntry>>();
 
   async get(key: ThreadKey): Promise<{ entry: SessionEntry; created: boolean }> {
     const existing = this.entries.get(key);
     if (existing) {
       return { entry: existing, created: false };
     }
-    const override = getWorkdirStore().get(key);
-    let workdir: string;
-    if (override) {
-      workdir = override;
-    } else {
-      const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
-      workdir = path.join(SESSIONS_DIR, safeKey);
-      await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
+    const inFlight = this.creating.get(key);
+    if (inFlight) {
+      return { entry: await inFlight, created: false };
     }
-    const entry = new SessionEntry(new Session({ threadKey: key, workdir }));
-    this.entries.set(key, entry);
-    return { entry, created: true };
+    const work = (async (): Promise<SessionEntry> => {
+      const override = getWorkdirStore().get(key);
+      let workdir: string;
+      if (override) {
+        workdir = override;
+      } else {
+        const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
+        workdir = path.join(SESSIONS_DIR, safeKey);
+        await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
+      }
+      const entry = new SessionEntry(new Session({ threadKey: key, workdir }));
+      this.entries.set(key, entry);
+      return entry;
+    })();
+    this.creating.set(key, work);
+    try {
+      const entry = await work;
+      return { entry, created: true };
+    } finally {
+      this.creating.delete(key);
+    }
   }
 
   has(key: ThreadKey): boolean {

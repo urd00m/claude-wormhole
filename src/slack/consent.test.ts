@@ -98,7 +98,43 @@ async function main() {
   await tryResolveByReply(captureClient, "C2", "T2", "yes", "U3");
   await p3;
 
-  console.log("✅ consent verification passed (approve, reply-no, non-trigger)");
+  // Two pending in the same thread → a reply should resolve the NEWEST.
+  // Regression: tryResolveByReply previously picked the first-iterated
+  // (oldest) entry, which would approve the wrong worker when two spawned
+  // workers each requested consent in the same Slack thread.
+  const pA = askConsent({
+    client: captureClient,
+    channel: "C3",
+    threadTs: "T3",
+    toolName: "Bash",
+    command: "older-worker-cmd",
+    reason: "older",
+  });
+  // Stagger insertions so Map iteration order differs.
+  await new Promise((r) => setTimeout(r, 5));
+  const pB = askConsent({
+    client: captureClient,
+    channel: "C3",
+    threadTs: "T3",
+    toolName: "Bash",
+    command: "newer-worker-cmd",
+    reason: "newer",
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  const consumedNewest = await tryResolveByReply(captureClient, "C3", "T3", "yes", "U4");
+  assert(consumedNewest, "reply 'yes' should consume newest pending");
+  // Race: which promise resolved? The newer one should be true now.
+  const newerResolved = await Promise.race([
+    pB.then(() => "B"),
+    new Promise<string>((r) => setTimeout(() => r("timeout"), 50)),
+  ]);
+  assert(newerResolved === "B", "newest (pB) must be the one resolved by 'yes'");
+  // Older is still pending — drain it.
+  await tryResolveByReply(captureClient, "C3", "T3", "no", "U4");
+  const olderResult = await pA;
+  assert(olderResult === false, "older (pA) should resolve to false on second reply");
+
+  console.log("✅ consent verification passed (approve, reply-no, non-trigger, newest-first)");
 }
 
 main().catch((err) => {

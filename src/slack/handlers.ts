@@ -95,7 +95,19 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     return;
   }
 
-  const { entry, created } = await sessions.get(key);
+  let entry: Awaited<ReturnType<typeof sessions.get>>["entry"];
+  let created: boolean;
+  try {
+    ({ entry, created } = await sessions.get(key));
+  } catch (err) {
+    // If session creation throws (e.g. disk full, EACCES on mkdir), the
+    // enqueue's finally — which is normally responsible for clearing
+    // dedupeKey — never runs. Without this catch the key stays in
+    // `inFlight` forever and every Slack retry of this same event ts is
+    // silently dropped.
+    inFlight.delete(dedupeKey);
+    throw err;
+  }
   if (created) {
     void markActive(client, msg.channel, replyThreadTs);
   }

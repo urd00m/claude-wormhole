@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { SESSIONS_DIR } from "../../config.js";
 import type { Session } from "../session.js";
 import { getWorkdirStore, resolveWorkdir } from "../workdirStore.js";
 
@@ -7,6 +10,12 @@ export type WorkdirMcpCtx = {
   session: Session;
   threadKey: string;
 };
+
+/** Default per-thread sandbox dir, matching SessionManager.get's computation. */
+function defaultSandboxFor(threadKey: string): string {
+  const safe = threadKey.replace(/[^A-Za-z0-9_-]/g, "_");
+  return path.join(SESSIONS_DIR, safe);
+}
 
 /**
  * MCP server exposing set_workdir / get_workdir. When the user asks to work
@@ -61,12 +70,25 @@ export function buildWorkdirMcp(ctx: WorkdirMcpCtx) {
     {},
     async () => {
       const had = getWorkdirStore().remove(ctx.threadKey);
+      // Also rotate the live Session's workdir back to the default sandbox.
+      // SessionManager.get only reads the workdirStore on session creation,
+      // so without this the in-memory Session keeps running in the OLD
+      // override forever — the user-visible "next message uses default"
+      // promise was a lie.
+      const defaultDir = defaultSandboxFor(ctx.threadKey);
+      try {
+        fs.mkdirSync(path.join(defaultDir, "uploads"), { recursive: true });
+      } catch {
+        /* best-effort; setWorkdir won't validate, and the agent will see the
+           dir come into existence at first write */
+      }
+      ctx.session.setWorkdir(defaultDir);
       return {
         content: [
           {
             type: "text",
             text: had
-              ? "Workdir override cleared. Next message will use the default sessions/<threadKey>/ sandbox."
+              ? `Workdir override cleared. Next message will use the default sandbox \`${defaultDir}\`.`
               : "No override set; already on the default sandbox.",
           },
         ],

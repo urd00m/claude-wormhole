@@ -36,6 +36,19 @@ const REDIRECTED_SPAWN_TOOLS = new Set(["Agent", "Task"]);
 const SPAWN_REDIRECT_MESSAGE =
   "Agent/Task is disabled in this harness. Use `mcp__spawn__spawn` instead — same purpose, accepts `{ prompt: string, description?: string, background?: boolean }`. Multiple spawn calls in one assistant turn run in parallel; set `background: true` for fire-and-forget.";
 
+// AskUserQuestion has no Slack surface (the CLI's picker UI is interactive-
+// only) and under bypassPermissions the CLI returns an empty answer when the
+// tool fires — which the model interprets as "ask again," producing an
+// infinite loop where the agent is stuck waiting for input that the harness
+// cannot deliver. session.ts and tools/spawn.ts already remove the tool from
+// the model's surface via `disallowedTools`; this is a belt-and-suspenders
+// gate so any future preset change or agent variant that still surfaces the
+// tool can't death-loop. The deny message redirects the model to ask in
+// plain text instead — the user replies in the next Slack message.
+const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
+const ASK_USER_QUESTION_REDIRECT =
+  "AskUserQuestion is disabled in this harness (no Slack picker UI). Ask your question as plain text in your reply; the user will answer in their next Slack message.";
+
 export type Gate = (
   toolName: string,
   input: Record<string, unknown>,
@@ -56,6 +69,9 @@ export function classifyCall(
   // because the same buildCanUseTool is wired for both.
   if (REDIRECTED_SPAWN_TOOLS.has(toolName)) {
     return { kind: "deny", reason: SPAWN_REDIRECT_MESSAGE };
+  }
+  if (toolName === ASK_USER_QUESTION_TOOL) {
+    return { kind: "deny", reason: ASK_USER_QUESTION_REDIRECT };
   }
   if (agentID && SUBAGENT_BLOCKED_TOOLS.has(toolName)) {
     return { kind: "deny", reason: `${toolName} is not available to sub-agents` };

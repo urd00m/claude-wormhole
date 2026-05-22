@@ -71,4 +71,20 @@ for (const agentId of [undefined, SUB]) {
   }
 }
 
+// AskUserQuestion → deny with a redirect to plain-text questions. Without
+// this gate, the CLI returns an empty answer under bypassPermissions and
+// the model loops forever waiting for input that the harness cannot
+// deliver — the "main slack agent asks for input" death-loop bug.
+for (const agentId of [undefined, SUB]) {
+  const d = classifyCall("AskUserQuestion", { questions: [] }, agentId);
+  assert(
+    d.kind === "deny",
+    `AskUserQuestion (agentID=${agentId ?? "main"}) must deny, got ${d.kind}`,
+  );
+  assert(
+    d.kind === "deny" && /plain text/i.test(d.reason),
+    `AskUserQuestion deny must redirect to plain text, got: ${d.kind === "deny" ? d.reason : ""}`,
+  );
+}
+
 console.log("✅ canUseTool gating verified");

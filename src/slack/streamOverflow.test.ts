@@ -85,10 +85,63 @@ async function testStreamerSpansMessages() {
   assert(allText.includes("TAIL_MARKER"), "tail of long message was dropped");
 }
 
+// Regression: finalize must drain any in-flight flush AND its queued
+// flushAgain before declaring closed — otherwise a setText issued by the
+// SDK's onFinal hook (which fires the moment streaming ends, while a
+// previous flush triggered by the last token-delta is still awaiting
+// chat.update) gets silently dropped, and the user sees an earlier shorter
+// version of the reply ("long messages cut off").
+async function testFinalizeWaitsForInFlightFlushAndCapturesLatestSetText() {
+  const edits: Edit[] = [];
+  const posts: Post[] = [];
+
+  // chat.update returns slowly so a flush is genuinely in-flight when the
+  // next setText / finalize fires. Use a real microtask delay (setTimeout
+  // 50ms) — Promise.resolve() chains would resolve in the same tick and
+  // race wouldn't materialize.
+  const slowClient = {
+    chat: {
+      postMessage: async ({ text }: { text: string }) => {
+        const ts = `t${posts.length + 1}`;
+        posts.push({ ts, text });
+        return { ts };
+      },
+      update: async ({ ts, text }: { ts: string; text: string }) => {
+        await new Promise((r) => setTimeout(r, 50));
+        edits.push({ ts, text });
+        return { ok: true };
+      },
+    },
+  } as never;
+
+  const s = new SlackStreamer(slowClient, "C1", "T1");
+  await s.open();
+
+  // Simulate streaming: first an appendText that triggers a flush (which
+  // will be slow), then the SDK's onFinal hook setting the canonical full
+  // text right after, then finalize. Without the drain fix, the FINAL
+  // marker would only appear in textBuffer but never reach Slack.
+  s.appendText("STREAMED_INTERIM");
+  // Yield to let the in-flight flush kick off chat.update (which sleeps 50ms).
+  await new Promise((r) => setTimeout(r, 10));
+  s.setText("CANONICAL_FINAL_REPLY_WITH_TAIL_MARKER");
+  await s.finalize();
+
+  // Find the latest text written to message[0].
+  const updatesForFirstMsg = edits.filter((e) => e.ts === "t1");
+  assert(updatesForFirstMsg.length > 0, "expected at least one update for message[0]");
+  const latest = updatesForFirstMsg[updatesForFirstMsg.length - 1].text;
+  assert(
+    latest.includes("TAIL_MARKER"),
+    `finalize dropped the post-flush setText; last text on message[0] was:\n${latest}`,
+  );
+}
+
 async function main() {
   await testSplitterPlain();
   await testSplitterPreservesCodeFence();
   await testStreamerSpansMessages();
+  await testFinalizeWaitsForInFlightFlushAndCapturesLatestSetText();
   console.log("✅ stream overflow verification passed");
 }
 

@@ -130,11 +130,15 @@ export async function tryResolveByReply(
   else if (["no", "n", "deny", "cancel", "stop"].includes(t)) allowed = false;
   if (allowed === null) return false;
 
-  // Find newest pending in this thread
+  // Find newest pending in this thread. The `pending` Map preserves insertion
+  // order, so the LAST iterated match is the newest. Without overwriting on
+  // each match (previously: `if (!pick) pick = …`) two open consent prompts
+  // in the same thread — e.g. parallel spawned workers — would resolve the
+  // OLDEST on a user "yes," approving the wrong tool call.
   let pick: [string, Pending] | null = null;
   for (const [id, p] of pending) {
     if (p.channel === channel && p.threadTs === threadTs) {
-      if (!pick) pick = [id, p];
+      pick = [id, p];
     }
   }
   if (!pick) return false;

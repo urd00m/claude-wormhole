@@ -16,7 +16,19 @@ export class Scheduler {
   /** Start all stored crons. Call once at boot. */
   start(): void {
     for (const entry of this.store.list()) {
-      this.registerTask(entry);
+      // node-cron's `schedule()` throws on invalid timezone (and some malformed
+      // expressions slip past store-time validation when the store file was
+      // hand-edited or written by an older version). Without per-entry isolation
+      // one bad row would abort the for-loop and silently leave every later
+      // cron unregistered.
+      try {
+        this.registerTask(entry);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[cron] failed to register ${entry.id} (${entry.expression} ${entry.timezone ?? ""}): ${msg} — skipping`,
+        );
+      }
     }
   }
 
@@ -25,8 +37,16 @@ export class Scheduler {
     if (!validate(input.expression)) {
       throw new Error(`invalid cron expression: ${input.expression}`);
     }
+    // Persist first to mint a stable id+createdAt, but roll back if scheduling
+    // fails — otherwise a bad timezone (which `validate` does NOT catch) leaves
+    // a ghost row in crons.json that re-throws every boot.
     const entry = this.store.add(input);
-    this.registerTask(entry);
+    try {
+      this.registerTask(entry);
+    } catch (err) {
+      this.store.remove(entry.id);
+      throw err;
+    }
     return entry;
   }
 
