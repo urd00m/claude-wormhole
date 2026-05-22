@@ -148,6 +148,7 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
               allowDangerouslySkipPermissions: true,
               additionalDirectories: ["/"],
               includePartialMessages: false,
+              env: buildWorkerEnv(),
             },
           });
 
@@ -236,4 +237,34 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
     tools: [spawnTool],
     alwaysLoad: true,
   });
+}
+
+/**
+ * Env for spawned worker CLI subprocesses. Inherits the wormhole node's
+ * process.env, then forces CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS to 1 h
+ * (3,600,000 ms) unless the user has already set it.
+ *
+ * Why: the bundled Claude CLI runs a built-in async-agent stall watchdog
+ * (default 600,000 ms = 10 min) that aborts a recursively-spawned worker's
+ * MCP control stream after that much idle time. Idle here means "no
+ * tool_use in flight from the SDK's view," which is exactly what happens
+ * during long benches launched via `run_in_background: true` Bash +
+ * ScheduleWakeup — the worker is genuinely waiting on real work, but the
+ * background-bash tool_result returned in milliseconds so the SDK sees an
+ * idle agent. Once the watchdog aborts, every subsequent
+ * `mcp__spawn__spawn` from that worker fails synchronously with
+ * "Stream closed" until the worker exits.
+ *
+ * Real benches in this repo run 15–30 min. 1 h headroom covers them with
+ * a comfortable margin. Override via env if a longer bench is needed.
+ */
+function buildWorkerEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  if (!out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) {
+    out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = "3600000";
+  }
+  return out;
 }
