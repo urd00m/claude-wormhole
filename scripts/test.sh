@@ -22,6 +22,7 @@ TESTS=(
   src/agent/sessionStream.test.ts
   src/agent/runtime/claude.test.ts
   src/agent/runtime/codex.test.ts
+  src/agent/runtime/codexWireFormat.test.ts
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
