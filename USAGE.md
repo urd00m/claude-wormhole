@@ -268,7 +268,7 @@ Run `./scripts/doctor.sh` after — it confirms Codex auth and the CLI is on PAT
 The Codex integration is the first slice. Compared to a Claude thread:
 
 - **No custom MCP tools.** Codex threads can't call `slack_post_file`, `set_workdir`, `cron_add`, etc. — they're MCP-served, and the Codex MCP bridge isn't wired yet. `slack_post_message` is **not** affected (the streamed reply still goes back to Slack like any other turn).
-- **No sub-agents / spawn.** The recursive `Task` / `spawn` pattern is Claude-only for now.
+- **No sub-agents / spawn FROM Codex.** A Codex thread can't call `mcp__spawn__spawn` (no MCP). The reverse — a Claude thread dispatching a *Codex worker* — does work: pass `runtime: "codex"` to the spawn tool and the worker runs under Codex, returns its final text. Codex workers see no MCP and can't themselves spawn further workers.
 - **Coarser consent gate.** Claude's destructive-command consent runs through a per-call classifier. Codex doesn't have an equivalent per-call IPC hook; we run it with `--sandbox workspace-write` (writes restricted to the thread's cwd) + `--dangerously-bypass-approvals-and-sandbox` so it doesn't deadlock on absent TTY prompts. Net effect: Codex threads can freely run shell commands within the workspace, but writes outside it are blocked. If you're going to point a Codex thread at a real project (not the default sandbox), keep that in mind.
 - **No diagram MCP helper.** You can still ask Codex to write `.mmd` source and run `mermaid-cli` itself via shell.
 

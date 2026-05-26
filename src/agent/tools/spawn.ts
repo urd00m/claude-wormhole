@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   createSdkMcpServer,
@@ -11,6 +12,8 @@ import { env } from "../../config.js";
 import { SYSTEM_PROMPT } from "../systemPrompt.js";
 import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
 import type { TaskEvent } from "../session.js";
+import { CodexRuntime } from "../runtime/codex.js";
+import type { CodexProcessFactory } from "../runtime/codexProcess.js";
 
 /**
  * Context for one level of the spawn-MCP hierarchy. `depth` is THIS MCP's
@@ -31,6 +34,13 @@ export type SpawnCtx = {
   buildCanUseTool: () => CanUseTool;
   /** Lifecycle hook — fired when a worker starts and when it completes. */
   onTaskEvent?: (event: TaskEvent) => void;
+  /**
+   * Test seam — overrides the codex subprocess factory used for Codex
+   * workers. Production omits this and CodexRuntime uses the real
+   * spawnCodexProcess. Lets the test suite exercise the Codex worker path
+   * without invoking the real `codex` CLI.
+   */
+  codexProcessFactory?: CodexProcessFactory;
 };
 
 /**
@@ -66,12 +76,112 @@ export function activeBackgroundWorkerCount(): number {
  *
  * Workers do NOT receive workdir/cron mutator MCPs.
  */
+export type WorkerOutcome = { finalText: string; outcome: "completed" | "failed" };
+
+/**
+ * Claude worker dispatch — wraps the existing `query()` loop. Extracted
+ * to module scope so the tool handler can branch on the requested runtime
+ * without ballooning into a single 200-line closure. Returns the worker's
+ * canonical final text + outcome.
+ */
+export async function runClaudeWorker(
+  ctx: SpawnCtx,
+  prompt: string,
+  workerMcpServers: Record<string, McpSdkServerConfigWithInstance>,
+): Promise<WorkerOutcome> {
+  let finalText = "";
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    const workerQ = query({
+      prompt,
+      options: {
+        cwd: ctx.workdir,
+        model: env.ANTHROPIC_MODEL,
+        systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
+        tools: { type: "preset", preset: "claude_code" },
+        disallowedTools: ["AskUserQuestion"],
+        canUseTool: ctx.buildCanUseTool(),
+        mcpServers: workerMcpServers,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        additionalDirectories: ["/"],
+        includePartialMessages: false,
+        env: buildWorkerEnv(),
+      },
+    });
+
+    for await (const msg of workerQ as AsyncIterable<SDKMessage>) {
+      if (msg.type === "result") {
+        const r = msg as { subtype?: string; result?: string };
+        if (r.subtype === "success" && typeof r.result === "string") {
+          finalText = r.result;
+        }
+      } else if (msg.type === "assistant") {
+        const m = msg as {
+          parent_tool_use_id?: string | null;
+          message?: { content?: unknown };
+        };
+        if (m.parent_tool_use_id) continue;
+        const content = (m.message?.content ?? []) as Array<{ type?: string; text?: string }>;
+        for (const block of content) {
+          if (block.type === "text" && typeof block.text === "string") {
+            finalText = block.text;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    outcome = "failed";
+    finalText = err instanceof Error ? err.message : String(err);
+  }
+  return { finalText, outcome };
+}
+
+/**
+ * Codex worker dispatch — instantiates a fresh `CodexRuntime` for the
+ * worker, sends the prompt as a single turn, returns its final text. The
+ * worker:
+ *   - Sees NO wormhole MCP tools (Codex's MCP integration is a separate,
+ *     deferred slice — see TODO "Codex parity — MCP shim"). So this is
+ *     "ask Codex a question, get its answer back" rather than a fully-
+ *     featured agent. Useful for second opinions, model-specific tasks.
+ *   - Cannot recursively spawn — same reason.
+ *   - Runs in the parent's workdir (`ctx.workdir`).
+ *   - Honors the harness's coarse Codex sandbox (--sandbox workspace-write
+ *     + --dangerously-bypass-approvals-and-sandbox) configured inside
+ *     CodexRuntime; the wormhole's consent classifier doesn't gate
+ *     Codex's native shell. See README + USAGE.
+ *
+ * The `ctx.codexProcessFactory` test seam lets unit tests inject a fake
+ * CodexProcess yielding synthesized JSONL — production omits this and
+ * CodexRuntime uses spawnCodexProcess.
+ */
+export async function runCodexWorker(
+  ctx: SpawnCtx,
+  prompt: string,
+): Promise<WorkerOutcome> {
+  try {
+    const rt = new CodexRuntime({
+      threadKey: `spawn-${randomUUID()}`,
+      workdir: ctx.workdir,
+      processFactory: ctx.codexProcessFactory,
+    });
+    const out = await rt.send({ text: prompt });
+    return { finalText: out.finalText, outcome: "completed" };
+  } catch (err) {
+    return {
+      finalText: err instanceof Error ? err.message : String(err),
+      outcome: "failed",
+    };
+  }
+}
+
 export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
   const myDepth = ctx.depth;
 
   const spawnTool = tool(
     "spawn",
-    `Spawn a worker sub-agent for parallel or context-isolated work. This is the ONLY sub-agent dispatch path in this harness — native Agent/Task tool calls are denied at the canUseTool gate and redirected here. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Current spawn-MCP depth: ${myDepth}.`,
+    `Spawn a worker sub-agent for parallel or context-isolated work. This is the ONLY sub-agent dispatch path in this harness — native Agent/Task tool calls are denied at the canUseTool gate and redirected here. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Set runtime: "codex" to dispatch the worker to the OpenAI Codex CLI instead of Claude — useful for second opinions or Codex-specific behavior; Codex workers see no MCP tools and cannot recursively spawn. Current spawn-MCP depth: ${myDepth}.`,
     {
       prompt: z
         .string()
@@ -88,10 +198,20 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
         .boolean()
         .optional()
         .describe("Alias for `background` — accepted for compatibility with Claude Code CLI style. If either flag is true, the call runs in background mode."),
+      runtime: z
+        .enum(["claude", "codex"])
+        .optional()
+        .describe("Which runtime to launch the worker under. 'claude' (default) gets the full Claude Code tool surface and can recursively spawn. 'codex' dispatches to the codex CLI subprocess and returns its final text — Codex workers see no MCP tools and can't spawn further workers, so reach for it when you want a second opinion or Codex-specific capability, not when you need recursive orchestration."),
     },
-    async ({ prompt, description, background, run_in_background }) => {
+    async ({ prompt, description, background, run_in_background, runtime }) => {
+      const workerRuntime: "claude" | "codex" = runtime ?? "claude";
       const workerDepth = myDepth + 1;
-      if (workerDepth > MAX_SUBAGENT_DEPTH) {
+      // Depth cap applies only to the Claude path — Codex workers don't
+      // see the spawn MCP at all, so recursion isn't possible regardless
+      // of depth. Bypassing the cap for Codex keeps the door open for
+      // future "Claude → Codex → Claude" orchestration patterns once the
+      // Codex MCP shim ships.
+      if (workerRuntime === "claude" && workerDepth > MAX_SUBAGENT_DEPTH) {
         return {
           content: [
             {
@@ -111,73 +231,28 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
         kind: "started",
         taskId,
         description: label,
-        subagentType: isBackground ? `wormhole-spawn-bg-d${workerDepth}` : `wormhole-spawn-d${workerDepth}`,
+        subagentType:
+          workerRuntime === "codex"
+            ? `wormhole-spawn-codex${isBackground ? "-bg" : ""}`
+            : isBackground
+            ? `wormhole-spawn-bg-d${workerDepth}`
+            : `wormhole-spawn-d${workerDepth}`,
       });
 
-      // Build the worker's MCP map: slack (post back to thread) + a
-      // recursive spawn MCP at the next depth. Workdir / cron mutators
-      // intentionally omitted — workers can't change parent state.
-      const workerSpawnMcp = buildSpawnMcp({ ...ctx, depth: workerDepth });
-      const workerMcpServers: Record<string, McpSdkServerConfigWithInstance> = {
-        slack: ctx.buildSlackMcp(),
-        spawn: workerSpawnMcp,
+      // Build the worker's MCP map (Claude only). Codex workers see no
+      // MCP, so this is skipped for that runtime.
+      const buildClaudeWorkerMcp = (): Record<string, McpSdkServerConfigWithInstance> => {
+        const workerSpawnMcp = buildSpawnMcp({ ...ctx, depth: workerDepth });
+        return {
+          slack: ctx.buildSlackMcp(),
+          spawn: workerSpawnMcp,
+        };
       };
 
-      // Inner runner: shared by sync and background paths. Returns the
-      // worker's final text + outcome.
-      const runWorker = async (): Promise<{ finalText: string; outcome: "completed" | "failed" }> => {
-        let finalText = "";
-        let outcome: "completed" | "failed" = "completed";
-        try {
-          const workerQ = query({
-            prompt,
-            options: {
-              cwd: ctx.workdir,
-              model: env.ANTHROPIC_MODEL,
-              systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
-              tools: { type: "preset", preset: "claude_code" },
-              // Workers run under bypassPermissions like the main agent, so
-              // AskUserQuestion would also death-loop here (CLI returns an
-              // empty answer with no picker UI, model re-asks forever). Match
-              // the main agent's mitigation: drop it from the worker's tool
-              // surface; the system prompt tells it to ask in plain text.
-              disallowedTools: ["AskUserQuestion"],
-              canUseTool: ctx.buildCanUseTool(),
-              mcpServers: workerMcpServers,
-              permissionMode: "bypassPermissions",
-              allowDangerouslySkipPermissions: true,
-              additionalDirectories: ["/"],
-              includePartialMessages: false,
-              env: buildWorkerEnv(),
-            },
-          });
-
-          for await (const msg of workerQ as AsyncIterable<SDKMessage>) {
-            if (msg.type === "result") {
-              const r = msg as { subtype?: string; result?: string };
-              if (r.subtype === "success" && typeof r.result === "string") {
-                finalText = r.result;
-              }
-            } else if (msg.type === "assistant") {
-              const m = msg as {
-                parent_tool_use_id?: string | null;
-                message?: { content?: unknown };
-              };
-              if (m.parent_tool_use_id) continue;
-              const content = (m.message?.content ?? []) as Array<{ type?: string; text?: string }>;
-              for (const block of content) {
-                if (block.type === "text" && typeof block.text === "string") {
-                  finalText = block.text;
-                }
-              }
-            }
-          }
-        } catch (err) {
-          outcome = "failed";
-          finalText = err instanceof Error ? err.message : String(err);
-        }
-        return { finalText, outcome };
-      };
+      const runWorker = async (): Promise<WorkerOutcome> =>
+        workerRuntime === "codex"
+          ? runCodexWorker(ctx, prompt)
+          : runClaudeWorker(ctx, prompt, buildClaudeWorkerMcp());
 
       if (!isBackground) {
         // Synchronous path: block on the worker.

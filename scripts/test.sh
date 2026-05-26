@@ -16,6 +16,7 @@ TESTS=(
   src/agent/recursiveAgents.test.ts
   src/agent/spawnMcp.test.ts
   src/agent/spawnBackground.test.ts
+  src/agent/spawnCodexWorker.test.ts
   src/agent/sessionIsolation.test.ts
   src/agent/spawnFlow.test.ts
   src/agent/sessionStream.test.ts
