@@ -19,10 +19,13 @@ function baseEnv(): Record<string, string | undefined> {
 
 async function main() {
   // --- (1) Defaults: no Codex env vars set ---
+  // OPENAI_MODEL defaults to "" — codex.ts skips `-m` when blank, so codex
+  // picks its own auth-aware default (avoids the gpt-5-codex / ChatGPT
+  // subscription rejection trap).
   {
     const cfg = parseConfig(baseEnv());
     assert(cfg.DEFAULT_RUNTIME === "claude", `default runtime: ${cfg.DEFAULT_RUNTIME}`);
-    assert(cfg.OPENAI_MODEL === "gpt-5-codex", `default OPENAI_MODEL: ${cfg.OPENAI_MODEL}`);
+    assert(cfg.OPENAI_MODEL === "", `default OPENAI_MODEL must be empty, got: ${cfg.OPENAI_MODEL}`);
     assert(cfg.OPENAI_API_KEY === undefined, "OPENAI_API_KEY undefined when unset");
   }
 

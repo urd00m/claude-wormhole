@@ -113,9 +113,20 @@ function buildPrompt(input: SessionInput): string {
 
 /**
  * Build the CLI args for either a fresh `codex exec` or `codex exec
- * resume <uuid>`. The two diverge only in (a) the presence of the `resume`
- * subcommand + positional UUID, and (b) which mode-specific flags are
- * accepted by each.
+ * resume <uuid>`. The two subcommands accept DIFFERENT flag surfaces:
+ *
+ *   - `codex exec` accepts --cd, --sandbox, --add-dir (the cwd/sandbox
+ *     setup for a fresh session).
+ *   - `codex exec resume` does NOT accept --cd, --sandbox, --add-dir —
+ *     it inherits all of them from the resumed session's rollout. Passing
+ *     them anyway crashes with "unexpected argument '--cd' found".
+ *
+ * Both accept --json, --skip-git-repo-check, -m, -o,
+ * --dangerously-bypass-approvals-and-sandbox.
+ *
+ * `model` is optional: when empty we omit `-m` entirely so codex falls
+ * back to its auth-aware default (`gpt-5-codex` rejects under ChatGPT
+ * subscription auth — letting codex pick lets it work across auth modes).
  */
 function buildArgs(opts: {
   resumeFrom: string | null;
@@ -124,24 +135,23 @@ function buildArgs(opts: {
   lastMessageFile: string;
   prompt: string;
 }): string[] {
-  const common = [
+  const sharedFlags: string[] = [
     "--json",
     "--skip-git-repo-check",
-    "--cd",
-    opts.workdir,
-    "-m",
-    opts.model,
     "--dangerously-bypass-approvals-and-sandbox",
     "-o",
     opts.lastMessageFile,
   ];
+  if (opts.model.length > 0) {
+    sharedFlags.push("-m", opts.model);
+  }
   if (opts.resumeFrom === null) {
-    // Fresh session: include --sandbox + --add-dir (accepted by `exec`
-    // but not by `exec resume`, which inherits the resumed session's
-    // sandbox config).
+    // Fresh session: --cd / --sandbox / --add-dir all live here.
     return [
       "exec",
-      ...common,
+      ...sharedFlags,
+      "--cd",
+      opts.workdir,
       "--sandbox",
       "workspace-write",
       "--add-dir",
@@ -150,7 +160,8 @@ function buildArgs(opts: {
       opts.prompt,
     ];
   }
-  return ["exec", "resume", ...common, opts.resumeFrom, "--", opts.prompt];
+  // Resume: NO --cd / --sandbox / --add-dir; positional UUID before prompt.
+  return ["exec", "resume", ...sharedFlags, opts.resumeFrom, "--", opts.prompt];
 }
 
 /**
@@ -169,14 +180,60 @@ function tryParseLine(line: string): unknown | null {
 }
 
 /**
- * Extract the session UUID from a `session_meta` event. Returns null if
- * the line isn't a session_meta event or the payload lacks `id`.
+ * Extract the session UUID from a `thread.started` event. This is the
+ * wire-format codex --json actually emits on stdout (verified against
+ * codex v0.133.0):
+ *
+ *   {"type":"thread.started","thread_id":"019e6649-..."}
+ *
+ * Note: the persisted rollout files under ~/.codex/sessions/ use a
+ * different shape ({"type":"session_meta","payload":{"id":...}}). We
+ * pinned to the wrong one initially; the smoke test against the real
+ * binary uncovered the mismatch. The stdout shape is what we get when
+ * we spawn `codex exec --json` and consume its output.
  */
 function extractSessionId(ev: unknown): string | null {
   if (typeof ev !== "object" || ev === null) return null;
-  const e = ev as { type?: string; payload?: { id?: unknown } };
-  if (e.type !== "session_meta") return null;
-  return typeof e.payload?.id === "string" ? e.payload.id : null;
+  const e = ev as { type?: string; thread_id?: unknown };
+  if (e.type !== "thread.started") return null;
+  return typeof e.thread_id === "string" ? e.thread_id : null;
+}
+
+/**
+ * Extract a human-readable error message from `error` or `turn.failed`
+ * events. These come on stdout (NOT stderr — codex's stderr typically only
+ * carries the harmless `"Reading additional input from stdin..."` log
+ * line). Surface them in preference to stderr so the user gets the
+ * actual model/billing/auth error rather than the stdin-mode log.
+ *
+ * Wire shapes:
+ *   {"type":"error","message":"...inner json or text..."}
+ *   {"type":"turn.failed","error":{"message":"...same..."}}
+ *
+ * The `message` is sometimes itself a JSON-stringified inner error
+ * (e.g. an OpenAI 4xx). We try to unwrap one level to surface the
+ * human-readable inner `.error.message`, falling back to the raw string.
+ */
+function extractErrorMessage(ev: unknown): string | null {
+  if (typeof ev !== "object" || ev === null) return null;
+  const e = ev as { type?: string; message?: unknown; error?: { message?: unknown } };
+  let raw: string | null = null;
+  if (e.type === "error" && typeof e.message === "string") raw = e.message;
+  else if (e.type === "turn.failed" && typeof e.error?.message === "string") raw = e.error.message;
+  if (raw === null) return null;
+  return unwrapNestedErrorJson(raw);
+}
+
+function unwrapNestedErrorJson(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return raw;
+  try {
+    const inner = JSON.parse(trimmed) as { error?: { message?: unknown } };
+    if (typeof inner?.error?.message === "string") return inner.error.message;
+  } catch {
+    /* not nested JSON, fall through */
+  }
+  return raw;
 }
 
 /**
@@ -243,6 +300,11 @@ export class CodexRuntime implements Runtime {
     });
 
     let observedSessionId: string | null = null;
+    // Errors come on stdout as `error` / `turn.failed` events, not on
+    // stderr (stderr typically only has the harmless "Reading additional
+    // input from stdin..." log). We capture the first one we see and
+    // surface it in preference to stderr when codex exits non-zero.
+    let observedErrorMessage: string | null = null;
 
     try {
       for await (const line of proc.lines()) {
@@ -251,6 +313,10 @@ export class CodexRuntime implements Runtime {
         const newId = extractSessionId(ev);
         if (newId !== null && observedSessionId === null) {
           observedSessionId = newId;
+        }
+        const errMsg = extractErrorMessage(ev);
+        if (errMsg !== null && observedErrorMessage === null) {
+          observedErrorMessage = errMsg;
         }
         this.dispatchEvent(ev, hooks);
       }
@@ -266,8 +332,14 @@ export class CodexRuntime implements Runtime {
         if (sessionIdAtStart !== null && isDanglingRolloutError(stderr)) {
           this.sessionId = null;
         }
+        // Build the user-facing message: prefer the stdout error event
+        // (the real diagnostic), then fall back to stderr, then a sentinel.
+        const detail =
+          observedErrorMessage ??
+          (stderr.trim().length > 0 ? stderr.trim() : null) ??
+          "(no error detail)";
         throw new Error(
-          `codex exec ${sessionIdAtStart === null ? "" : "resume "}exited with code ${exitCode}: ${stderr.trim() || "(no stderr)"}`,
+          `codex exec ${sessionIdAtStart === null ? "" : "resume "}exited with code ${exitCode}: ${detail}`,
         );
       }
 
@@ -298,48 +370,53 @@ export class CodexRuntime implements Runtime {
 
   /**
    * Translate one Codex JSONL event into runtime-neutral StreamHooks
-   * callbacks. Defensive — unknown event types are ignored. The mapping
-   * below targets the rollout file shape (`{ timestamp, type, payload }`);
-   * stdout-shape differences will surface in Phase 4 smoke tests and get
-   * folded in here.
+   * callbacks. Defensive — unknown event types are ignored.
+   *
+   * Wire shape verified against `codex --json` v0.133.0 stdout. Each line
+   * is a flat object whose `type` discriminates:
+   *
+   *   {"type":"thread.started","thread_id":"..."}
+   *   {"type":"turn.started"}
+   *   {"type":"item.completed","item":{"id":"...","type":"agent_message","text":"..."}}
+   *   {"type":"turn.completed","usage":{...}}
+   *   {"type":"error","message":"..."}
+   *   {"type":"turn.failed","error":{"message":"..."}}
+   *
+   * Sessions/error extraction happens in the send() loop (it needs the
+   * UUID + error text by reference). This method handles user-visible
+   * streaming text.
    */
   private dispatchEvent(ev: unknown, hooks: StreamHooks): void {
     if (typeof ev !== "object" || ev === null) return;
     const e = ev as {
       type?: string;
-      payload?: {
-        type?: string;
-        message?: unknown;
-        text?: unknown;
-        last_agent_message?: unknown;
-      };
+      item?: { type?: string; text?: unknown };
     };
 
-    if (e.type !== "event_msg") return;
-
-    switch (e.payload?.type) {
-      case "agent_message": {
-        // Streaming text from the assistant. Surface as an onText chunk
-        // so the Slack streamer can append it. The wormhole's stream.ts
-        // already handles ordering + throttling.
-        const text = typeof e.payload.message === "string" ? e.payload.message : null;
-        if (text) hooks.onText?.(text);
+    switch (e.type) {
+      case "item.completed": {
+        // Currently the only sub-type we surface is agent_message — Codex
+        // emits this once per assistant turn (per the v0.133.0 stdout
+        // probe; not a true delta-stream, more like end-of-turn). Other
+        // item types (tool calls, reasoning blocks) may surface here as
+        // Codex evolves; ignore them defensively.
+        const item = e.item;
+        if (item?.type === "agent_message" && typeof item.text === "string") {
+          hooks.onText?.(item.text);
+        }
         break;
       }
-      case "user_message":
-      case "task_started":
-      case "task_complete":
-      case "token_count":
-        // user_message: echo of our own prompt, no surface.
-        // task_started/task_complete: Codex's high-level turn lifecycle
-        //   markers; the agent_message events carry the actual user-visible
-        //   text. We deliberately don't fire onToolStart/onToolEnd from
-        //   these — that wiring lands once we map Codex's tool-call events
-        //   (TBD pending real stdout probe).
-        // token_count: cost telemetry, not user-visible.
+      case "thread.started":
+      case "turn.started":
+      case "turn.completed":
+      case "error":
+      case "turn.failed":
+        // thread.started / turn.* are lifecycle markers handled in send()
+        // (session-id extraction, error capture). Nothing user-visible
+        // to fire from dispatchEvent for them.
         break;
       default:
-        // Unknown subtype — defensively ignored.
+        // Unknown event — defensively ignored.
         break;
     }
   }

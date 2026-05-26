@@ -4,8 +4,21 @@
 // last-message file path and pre-write the "final agent text" to it so
 // the runtime's `-o` read returns deterministic content.
 //
-// Parallel to claude.test.ts: same shape, different runtime, so the
-// Runtime port has matching coverage on both implementations.
+// Event shape is the REAL `codex --json` stdout wire format, verified
+// against codex v0.133.0:
+//   {"type":"thread.started","thread_id":"..."}
+//   {"type":"turn.started"}
+//   {"type":"item.completed","item":{"id":"...","type":"agent_message","text":"..."}}
+//   {"type":"turn.completed","usage":{...}}
+//   {"type":"error","message":"..."}                     (failures)
+//   {"type":"turn.failed","error":{"message":"..."}}     (failures)
+//
+// This is DIFFERENT from the persisted rollout file shape (session_meta /
+// event_msg / payload.type) — an early version of this test used the
+// rollout format and the runtime accordingly, which broke against the
+// real binary. If you're updating this file, run a smoke probe like
+// `codex exec --json --skip-git-repo-check --cd /tmp -- "say hi"`
+// to confirm the wire is still what we expect.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -79,38 +92,43 @@ function lastMsgPathFor(label: string): string {
   return path.join(TMP_ROOT, `last-${label}-${Math.random().toString(36).slice(2)}.txt`);
 }
 
-/** session_meta line bearing a given UUID. */
+/** thread.started — carries the session UUID we pin for resume. */
 function metaLine(id: string): string {
-  return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "session_meta",
-    payload: { id, cwd: "/tmp", model_provider: "openai" },
-  });
+  return JSON.stringify({ type: "thread.started", thread_id: id });
 }
 
-/** event_msg.agent_message with given text. */
+/** item.completed with an agent_message item — the way Codex surfaces text. */
 function agentMessageLine(text: string): string {
   return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "event_msg",
-    payload: { type: "agent_message", message: text },
+    type: "item.completed",
+    item: { id: `item_${Math.random().toString(36).slice(2, 8)}`, type: "agent_message", text },
   });
 }
 
-function taskStartedLine(): string {
+function turnStartedLine(): string {
+  return JSON.stringify({ type: "turn.started" });
+}
+
+function turnCompletedLine(): string {
   return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "event_msg",
-    payload: { type: "task_started" },
+    type: "turn.completed",
+    usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 },
   });
 }
 
-function taskCompleteLine(text: string): string {
-  return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "event_msg",
-    payload: { type: "task_complete", last_agent_message: text },
-  });
+/** turn.complete equivalent for the legacy helper name — kept for callers below. */
+function taskCompleteLine(_text: string): string {
+  return turnCompletedLine();
+}
+
+/** error event — carries the human-readable diagnostic on stdout. */
+function errorLine(message: string): string {
+  return JSON.stringify({ type: "error", message });
+}
+
+/** turn.failed event — same role as `error` but wraps in .error.message. */
+function turnFailedLine(message: string): string {
+  return JSON.stringify({ type: "turn.failed", error: { message } });
 }
 
 type Recorded = {
@@ -194,6 +212,11 @@ async function main() {
     assert(args[args.indexOf("-o") + 1] === lastFile, "-o file matches injected path");
     assert(args[args.length - 1] === "hi", "prompt is final positional");
     assert(args[args.length - 2] === "--", "-- separator before prompt");
+    // Regression guard: when env.OPENAI_MODEL is blank (the default) we
+    // must NOT pass `-m`. The tests run under scripts/test.sh which sets
+    // ANTHROPIC_API_KEY=stub and leaves OPENAI_MODEL unset → the schema's
+    // empty-string default applies.
+    assert(!args.includes("-m"), `expected no -m flag when OPENAI_MODEL is blank, args: ${args.join(" ")}`);
 
     assert(rec.text.length === 1 && rec.text[0] === "hello from codex", `onText: ${JSON.stringify(rec.text)}`);
     assert(rec.finals.length === 1 && rec.finals[0] === "hello from codex", "final from -o");
@@ -238,7 +261,11 @@ async function main() {
     assert(sepIdx > 0, "-- separator present");
     assert(args2[sepIdx - 1] === SESSION, `session UUID before --: ${args2[sepIdx - 1]}`);
     assert(args2[sepIdx + 1] === "second", "prompt after separator");
-    // Resume args MUST NOT include --sandbox / --add-dir (those are exec-only).
+    // Resume args MUST NOT include --cd / --sandbox / --add-dir — `codex exec
+    // resume` rejects these (the resumed session's rollout already pins
+    // cwd/sandbox). Passing them anyway → "unexpected argument '--cd' found".
+    // Regression guard for the production bug fixed in Phase 8.
+    assert(!args2.includes("--cd"), "resume MUST omit --cd (regression: codex rejects it)");
     assert(!args2.includes("--sandbox"), "resume omits --sandbox (inherits from rollout)");
     assert(!args2.includes("--add-dir"), "resume omits --add-dir");
   }
@@ -464,6 +491,84 @@ async function main() {
     );
     assert(rec.text.join("") === "ok", `only valid agent text surfaces: ${JSON.stringify(rec.text)}`);
     assert(out.finalText === "ok", "final from -o");
+  }
+
+  // --- (9.5) Real-shape stdout error events surface as the thrown error ---
+  // Regression for the production "Reading additional input from stdin..."
+  // bug: codex's real errors come on stdout as `{type:"error", message:...}`
+  // or `{type:"turn.failed", error:{message:...}}`. stderr only contains the
+  // harmless stdin-mode log. The runtime must prefer the stdout diagnostic.
+  {
+    const captured: CapturedSpawn[] = [];
+    const lastFile = lastMsgPathFor("stdouterr");
+    const innerErrJson = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message: "The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.",
+      },
+    });
+    const rt = new CodexRuntime({
+      threadKey: "t-stdouterr",
+      workdir: TMP_ROOT,
+      processFactory: makeFactory(captured, [
+        {
+          lines: [
+            metaLine("00000000-0000-0000-0000-000000000001"),
+            turnStartedLine(),
+            errorLine(innerErrJson),
+            turnFailedLine(innerErrJson),
+          ],
+          exitCode: 1,
+          stderr: "Reading additional input from stdin...",
+        },
+      ]),
+      lastMessageFileFactory: () => lastFile,
+    });
+
+    let caught: string | null = null;
+    try {
+      await rt.send({ text: "hi" });
+    } catch (err) {
+      caught = err instanceof Error ? err.message : String(err);
+    }
+    assert(caught !== null, "must throw");
+    // Innermost human message is unwrapped from the nested OpenAI error JSON.
+    assert(
+      caught.includes("model is not supported"),
+      `expected unwrapped model error in message, got: ${caught}`,
+    );
+    // Stderr must NOT be the leading diagnostic.
+    assert(
+      !caught.includes("Reading additional input"),
+      `stderr leak: ${caught} (should prefer the stdout error event)`,
+    );
+  }
+
+  // --- (9.6) turn.failed without preceding error event still surfaces ---
+  {
+    const captured: CapturedSpawn[] = [];
+    const lastFile = lastMsgPathFor("turnfailed-only");
+    const rt = new CodexRuntime({
+      threadKey: "t-turnfailed",
+      workdir: TMP_ROOT,
+      processFactory: makeFactory(captured, [
+        {
+          lines: [metaLine("aaaa"), turnStartedLine(), turnFailedLine("rate limit hit")],
+          exitCode: 1,
+          stderr: "",
+        },
+      ]),
+      lastMessageFileFactory: () => lastFile,
+    });
+    let caught: string | null = null;
+    try {
+      await rt.send({ text: "hi" });
+    } catch (err) {
+      caught = err instanceof Error ? err.message : String(err);
+    }
+    assert(caught !== null && caught.includes("rate limit hit"), `expected turn.failed message: ${caught}`);
   }
 
   // --- (10) Empty/missing -o file → sentinel final ---

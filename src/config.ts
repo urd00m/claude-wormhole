@@ -17,7 +17,16 @@ export const configSchema = z.object({
   // credentials get stored at ~/.codex/ and the Codex CLI uses them
   // automatically. Empty strings are treated as "not set" downstream.
   OPENAI_API_KEY: z.string().optional(),
-  OPENAI_MODEL: z.string().default("gpt-5-codex"),
+  /**
+   * Model arg passed to `codex exec -m <model>`. Leave EMPTY (the default)
+   * to skip the flag entirely — codex then picks an auth-appropriate
+   * default. `gpt-5-codex` is rejected under ChatGPT subscription auth
+   * ("model is not supported when using Codex with a ChatGPT account"),
+   * so blanking the default lets the same .env work across both auth
+   * modes. Override here only if you specifically need a model name
+   * (and know your auth tier accepts it).
+   */
+  OPENAI_MODEL: z.string().default(""),
   /**
    * Default runtime for new threads. A per-thread override (set via the
    * runtime-switch control phrase in Slack — "switch to codex" etc.,

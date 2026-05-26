@@ -58,26 +58,18 @@ function makeFactory(
   };
 }
 
+// Real `codex --json` stdout shape (verified against codex v0.133.0).
 function metaLine(id: string): string {
-  return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "session_meta",
-    payload: { id, cwd: "/tmp", model_provider: "openai" },
-  });
+  return JSON.stringify({ type: "thread.started", thread_id: id });
 }
 function agentMessageLine(text: string): string {
   return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "event_msg",
-    payload: { type: "agent_message", message: text },
+    type: "item.completed",
+    item: { id: `item_${Math.random().toString(36).slice(2, 8)}`, type: "agent_message", text },
   });
 }
-function taskCompleteLine(text: string): string {
-  return JSON.stringify({
-    timestamp: new Date().toISOString(),
-    type: "event_msg",
-    payload: { type: "task_complete", last_agent_message: text },
-  });
+function taskCompleteLine(_text: string): string {
+  return JSON.stringify({ type: "turn.completed", usage: {} });
 }
 
 const TMP_ROOT = path.join(os.tmpdir(), `wormhole-spawn-codex-test-${Date.now()}`);
