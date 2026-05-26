@@ -3,7 +3,10 @@
 ## Priority
 
 - [ ] **Caveman skill** — add to the harness: <https://github.com/JuliusBrussee/caveman>
-- [ ] **Codex support** — alternative model/runtime path so a thread can be backed by Codex (OpenAI) instead of Claude. Switching is per-thread (similar shape to per-thread workdir override). Needs: provider abstraction over `session.ts`, env vars for the Codex key, tool-surface translation (since Codex's tool calling differs), parity for the consent / heartbeat / streaming layer.
+- [x] **Codex support — v1 (text-only)**: per-thread runtime selection via control phrases ("switch to codex", "use claude"). Persisted in `data/runtimes.json`. New CodexRuntime wraps `codex exec` / `codex exec resume`; provider-abstracted Runtime port shared with ClaudeRuntime. Streaming, heartbeat, end-session, workdir-overrides all work cross-runtime. Subscription auth (`codex login`) + API key (`OPENAI_API_KEY`) both supported. See README + USAGE.
+- [ ] **Codex parity — MCP shim** — stand up a stdio MCP server that exposes the wormhole's runtime-neutral ToolDefs (slack/workdir/cron/runtime/spawn) to Codex via `codex exec -c mcp_servers.wormhole.command=...`. Without this, Codex threads can't call `slack_post_file`, `set_workdir`, `cron_add`, or spawn sub-agents.
+- [ ] **Codex parity — spawn / sub-agents** — depends on the MCP shim. Worker `spawn` MCP handler should dispatch via the parent runtime so Codex parents can fan out to Codex workers (and vice versa). Today's `spawn.ts` calls Claude's `query()` directly.
+- [ ] **Codex parity — fine-grained consent gate** — Codex has no per-call IPC equivalent to Claude's `canUseTool`. Either (a) wire Codex's approval-policy hook if one ships in future versions, or (b) ship a `wormhole_shell` MCP tool and steer the model toward it via system prompt so destructive bash is gated like Claude's. Today Codex threads rely on `--sandbox workspace-write` alone.
 
 ## v1 — Single-workspace prototype (scope of initial build)
 
@@ -50,6 +53,7 @@
 ## Deferred — UX & alt-runtimes
 
 - [ ] **Active-session reactions** — visual marker on Slack messages indicating which threads currently have an in-memory agent session (vs threads where the user would be starting fresh). Right now the user has to mentally track which threads are "alive." Sketch: when a thread's session is hot, the root message gets a persistent `:satellite:` (or similar) reaction; when the session is GC'd or the bot restarts, the reaction is removed. Should survive across the existing heartbeat lifecycle without interfering with it.
+- [ ] **Runtime indicator reaction** — when a thread is pinned to Codex (vs the default Claude), reflect that visually so the user knows at a glance which backend is about to respond. E.g. `:robot_face:` for Codex / `:sparkles:` for Claude on the thread root. Should react to runtime-switch control phrases.
 
 ## Deferred — productionization
 

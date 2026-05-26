@@ -1,8 +1,12 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { SESSIONS_DIR } from "../config.js";
+import { SESSIONS_DIR, env } from "../config.js";
 import { Session } from "./session.js";
 import { getWorkdirStore } from "./workdirStore.js";
+import { getRuntimeStore, type RuntimeName } from "./runtimeStore.js";
+import { ClaudeRuntime } from "./runtime/claude.js";
+import { CodexRuntime } from "./runtime/codex.js";
+import type { Runtime } from "./runtime/types.js";
 
 export type ThreadKey = string;
 
@@ -21,7 +25,6 @@ class SessionEntry {
     this.session = session;
   }
 
-  /** Enqueue work; processes serially per thread. */
   async enqueue(work: () => Promise<void>): Promise<void> {
     return new Promise((resolve, reject) => {
       this.queue.push(async () => {
@@ -48,6 +51,32 @@ class SessionEntry {
       this.running = false;
     }
   }
+}
+
+/**
+ * Resolve which runtime a thread should use:
+ *   1. The per-thread override in `data/runtimes.json` wins (set via the
+ *      runtime-switch control phrase in Slack).
+ *   2. Otherwise fall back to env.DEFAULT_RUNTIME.
+ *
+ * Exposed for tests + so handlers can show the user which runtime they're
+ * about to talk to without instantiating one.
+ */
+export function resolveRuntimeName(key: ThreadKey): RuntimeName {
+  return getRuntimeStore().get(key) ?? env.DEFAULT_RUNTIME;
+}
+
+/**
+ * Build the concrete runtime instance for a thread. Kept separate from
+ * `Session` construction so SessionManager.get can swap runtimes without
+ * Session having to know how to build them.
+ */
+function buildRuntime(key: ThreadKey, workdir: string): Runtime {
+  const name = resolveRuntimeName(key);
+  if (name === "codex") {
+    return new CodexRuntime({ threadKey: key, workdir });
+  }
+  return new ClaudeRuntime({ threadKey: key, workdir });
 }
 
 export class SessionManager {
@@ -81,7 +110,8 @@ export class SessionManager {
         workdir = path.join(SESSIONS_DIR, safeKey);
         await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
       }
-      const entry = new SessionEntry(new Session({ threadKey: key, workdir }));
+      const runtime = buildRuntime(key, workdir);
+      const entry = new SessionEntry(new Session({ threadKey: key, runtime }));
       this.entries.set(key, entry);
       return entry;
     })();
@@ -101,10 +131,9 @@ export class SessionManager {
   /**
    * Drop the in-memory session entry for `key`. Returns true if an entry was
    * removed, false if none existed. The next message in that thread will
-   * spin up a fresh session (created=true). `close` does not interrupt
-   * in-flight work — the orphaned entry's queue continues running on its
-   * own reference; this only prevents future messages from being routed
-   * back to that same session.
+   * spin up a fresh session (created=true) — under whatever runtime the
+   * store currently resolves to, so this is also the mechanism the
+   * runtime-switch control phrase relies on.
    */
   close(key: ThreadKey): boolean {
     return this.entries.delete(key);

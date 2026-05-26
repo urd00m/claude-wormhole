@@ -6,7 +6,7 @@ How to actually use `slack-claude-agent` once it's running. See [README.md](./RE
 
 ## Mental model
 
-> **One Slack thread = one Claude agent.**
+> **One Slack thread = one agent session.**
 
 - The **first message** in a channel or DM starts a fresh agent session.
 - **Every reply in that thread** continues the same session — the agent remembers everything earlier in the thread.
@@ -17,7 +17,9 @@ Each session gets:
 
 - Its own working directory at `sessions/<channel_id>:<thread_ts>/`
 - Its own conversation history (kept in memory while the bot is running)
-- The full Claude Code tool surface: `Read`, `Write`, `Edit`, `Bash`, `WebFetch`, `WebSearch`, `Task` (sub-agents), `Grep`, `Glob`, and the custom `slack_post_message` / `slack_post_file` tools
+- One of two agent runtimes — **Claude** (default) or **Codex** — pickable per-thread (see below)
+
+When running Claude, the full Claude Code tool surface is available: `Read`, `Write`, `Edit`, `Bash`, `WebFetch`, `WebSearch`, `Task` (sub-agents), `Grep`, `Glob`, and the custom `slack_post_message` / `slack_post_file` tools. Codex threads have a narrower surface — see the **Picking a runtime** section.
 
 The bot replies to **every** DM and every message in a channel it's been invited to — no `@mention` required.
 
@@ -223,6 +225,63 @@ The classifier is conservative — it prefers false positives over false negativ
 
 ---
 
+## Picking a runtime (Claude or Codex)
+
+Every thread runs under one of two agent runtimes:
+
+- **Claude** (default) — Claude Agent SDK via the bundled `claude` CLI. Full tool surface, sub-agents, per-command consent gate.
+- **Codex** — OpenAI's `codex` CLI as a subprocess. Useful when you want a second opinion or when Codex's strengths fit the task better.
+
+To switch a thread:
+
+```
+You:   switch to codex
+Bot:   Runtime for this thread switched to `codex`. Your next message will run under it.
+
+You:   <your real prompt>
+Bot:   <Codex answers>
+
+You:   back to claude
+Bot:   Runtime for this thread switched to `claude`. Your next message will run under it.
+```
+
+Accepted phrasings: `switch to codex`, `use codex`, `back to codex`, `switch to claude`, `use claude`, `back to claude`, `/codex`, `/claude`, `set runtime to codex`, etc.
+
+### How it works
+
+- The override is per-thread and persisted at `data/runtimes.json` — survives bot restarts.
+- Switching closes the current in-memory session for that thread. The **next** message you send spins up a fresh session under the new runtime. Conversation history is **not** carried across runtimes.
+- New threads with no override use the runtime in `DEFAULT_RUNTIME` from `.env` (default: `claude`).
+- The two runtimes share the per-thread workdir (`sessions/<threadKey>/` or whatever you've pointed it at).
+
+### Codex setup
+
+If you've never used Codex before, install the CLI (Homebrew: `brew install codex`) and authenticate one of two ways:
+
+- **Subscription**: run `codex login` and complete the browser flow. Credentials get stored in `~/.codex/auth.json`. Leave `OPENAI_API_KEY` blank in `.env`.
+- **API key**: set `OPENAI_API_KEY` in `.env`.
+
+Run `./scripts/doctor.sh` after — it confirms Codex auth and the CLI is on PATH whenever any thread is pinned to Codex or `DEFAULT_RUNTIME=codex`.
+
+### Codex thread limitations (vs Claude)
+
+The Codex integration is the first slice. Compared to a Claude thread:
+
+- **No custom MCP tools.** Codex threads can't call `slack_post_file`, `set_workdir`, `cron_add`, etc. — they're MCP-served, and the Codex MCP bridge isn't wired yet. `slack_post_message` is **not** affected (the streamed reply still goes back to Slack like any other turn).
+- **No sub-agents / spawn.** The recursive `Task` / `spawn` pattern is Claude-only for now.
+- **Coarser consent gate.** Claude's destructive-command consent runs through a per-call classifier. Codex doesn't have an equivalent per-call IPC hook; we run it with `--sandbox workspace-write` (writes restricted to the thread's cwd) + `--dangerously-bypass-approvals-and-sandbox` so it doesn't deadlock on absent TTY prompts. Net effect: Codex threads can freely run shell commands within the workspace, but writes outside it are blocked. If you're going to point a Codex thread at a real project (not the default sandbox), keep that in mind.
+- **No diagram MCP helper.** You can still ask Codex to write `.mmd` source and run `mermaid-cli` itself via shell.
+
+If you want full parity, use a Claude thread.
+
+### Switching back, undo, etc.
+
+- "Switch to claude" / "back to claude" reverts.
+- `end session` works in both runtimes.
+- Workdir overrides set under Claude carry across to Codex and back — they live in `data/workdirs.json`, independent of the runtime.
+
+---
+
 ## Working directories
 
 By default, each thread gets a sandbox at `sessions/<channel_id>:<thread_ts>/`:
@@ -283,12 +342,21 @@ You don't call these directly — the agent decides when to use them. If you wan
 
 ## Billing — API key vs subscription
 
-How usage gets billed depends on which auth path you picked at setup:
+How usage gets billed depends on which runtime each thread is using **and** which auth path is configured for it.
+
+### Claude threads
 
 - **Subscription** (you ran `npm run login`): turns count against your Claude Pro or Claude Max subscription's quota. No per-token charges. Hitting the daily/weekly cap will surface as a `rate_limit` error in the thread until the quota resets.
 - **API key** (`ANTHROPIC_API_KEY` in `.env`): every turn is billed at standard API token rates against the key's organization. Long threads or sub-agent fan-out can add up quickly — keep an eye on the console at <https://console.anthropic.com/>.
 
-To switch between them: edit `.env` (or run `npm run logout` / `npm run login`), then restart `npm run dev`. The startup banner shows which mode is active.
+To switch between them for Claude threads: edit `.env` (or run `npm run logout` / `npm run login`), then restart `npm run dev`.
+
+### Codex threads
+
+- **Subscription** (you ran `codex login`): turns count against your ChatGPT / Codex subscription's quota. Credentials live in `~/.codex/auth.json`.
+- **API key** (`OPENAI_API_KEY` in `.env`): per-token billed against your OpenAI organization.
+
+Codex picks subscription auth automatically when `OPENAI_API_KEY` is blank. Switching the auth path is `.env` edit + restart.
 
 ---
 
@@ -300,6 +368,9 @@ To switch between them: edit `.env` (or run `npm run logout` / `npm run login`),
 | `:eyes:` but no reply | Anthropic API error — check the terminal logs. Bot will post `:warning: agent error: …` if it can. |
 | `❌ No Claude auth configured` at startup | Run `npm run login` (subscription) or set `ANTHROPIC_API_KEY` in `.env` (API key). |
 | `authentication_failed` / `oauth_org_not_allowed` | OAuth creds expired or wrong account — `npm run logout` then `npm run login` again. |
+| `Codex auth: neither OPENAI_API_KEY nor ~/.codex/...` in `doctor.sh` | A thread is pinned to Codex (or `DEFAULT_RUNTIME=codex`) but Codex isn't authenticated — run `codex login` or set `OPENAI_API_KEY`. |
+| `Codex CLI: codex not on PATH` | Install with `brew install codex` (macOS) — or via your package manager — then re-run `doctor.sh`. |
+| `codex exec ... exited with code N` in a Codex thread | Codex CLI surfaced an error — full stderr is in the agent reply. Common: missing auth, rollout pruned (sent "back to codex" then deleted `~/.codex/sessions/`), model name typo in `OPENAI_MODEL`. |
 | `not_in_channel` errors | Bot needs `/invite @YourBotName` in that channel. |
 | `missing_scope` errors | Re-create the app from `slack-manifest.yaml` or add the missing scope by hand, then reinstall. |
 | Heartbeat keeps adding emoji forever | Agent is hung; restart `npm run dev`. The session for that thread will reset. |

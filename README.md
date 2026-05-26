@@ -1,26 +1,27 @@
 # slack-claude-agent
 
-A Slack bot that **is** a Claude agent. Every Slack thread becomes its own Claude Code session — with file system access, Bash, web search, PDF reading, diagram rendering, and the ability to launch sub-agents — all driven by chatting in Slack.
+A Slack bot that **is** a coding agent. Every Slack thread becomes its own per-thread agent session — pick **Claude** or **Codex** as the runtime per thread — with file system access, Bash, web search, PDF reading, diagram rendering, and (Claude only, for now) sub-agents, all driven by chatting in Slack.
 
-Think of it as Claude Code in your DMs.
+Think of it as Claude Code or Codex CLI in your DMs.
 
-> For day-to-day usage (how threads map to sessions, what commands need consent, attaching files, asking for diagrams, etc.) see **[USAGE.md](./USAGE.md)**.
+> For day-to-day usage (how threads map to sessions, what commands need consent, attaching files, asking for diagrams, switching runtimes, etc.) see **[USAGE.md](./USAGE.md)**.
 
 ---
 
 ## What this repo gives you
 
 - A Node/TypeScript app that runs on your laptop and connects to Slack over **Socket Mode** (no public URL required).
-- **Per-thread Claude agent sessions** — open a new thread to start a new conversation; reply in an existing thread to continue it.
+- **Per-thread agent sessions** — open a new thread to start a new conversation; reply in an existing thread to continue it.
+- **Two interchangeable runtimes per thread** — say "switch to codex" or "use claude" in any thread to flip its backend. Default is Claude; persisted in `data/runtimes.json`.
 - **Reaction heartbeat** — `:eyes:` the instant the bot reads your message, a new emoji every 30 seconds while it works, all replaced with `:+1:` (or `:x:`) when done.
-- **Live streaming replies** — the bot's response edits into Slack as it writes, with inline `_🔧 Bash…_` / `_✅ Bash_` indicators for each tool call.
-- **Consent gate** — destructive commands (`rm`, `git reset --hard`, force-push, `dd`, file truncation, etc.) pause and ask for an Approve/Deny button click before running. Sub-agents go through the same gate.
+- **Live streaming replies** — the bot's response edits into Slack as it writes, with inline `_🔧 Bash…_` / `_✅ Bash_` indicators for each tool call (Claude only; Codex streams text).
+- **Consent gate** — destructive commands (`rm`, `git reset --hard`, force-push, `dd`, file truncation, etc.) pause and ask for an Approve/Deny button click before running. Claude threads + sub-agents go through this gate; Codex threads use a coarser sandbox (see USAGE).
 - **File ingest** — drop a PDF, image, or any file into the Slack thread; the bot reads it.
-- **File output** — agent can post images/PDFs/diagrams back into the thread.
-- **Sub-agents** — the agent can spawn sub-agents (via the SDK's `Task` tool) for parallel or context-isolated work.
-- **Scheduled runs (cron)** — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
-- **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` and project context. Per-thread, persistent across restarts.
-- **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately, without waiting for idle timeout. The next message in that thread starts fresh.
+- **File output** (Claude only) — agent can post images/PDFs/diagrams back into the thread via MCP.
+- **Sub-agents** (Claude only) — the agent can spawn sub-agents (via the `mcp__spawn__spawn` tool) for parallel or context-isolated work.
+- **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
+- **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
+- **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately. The next message in that thread starts fresh.
 
 ---
 
@@ -39,10 +40,16 @@ cd slack-claude-agent
 npm run login                # OAuth into your Claude Pro/Max subscription, OR
 # …set ANTHROPIC_API_KEY in .env to use a pay-as-you-go API key instead
 
-# 4. Sanity check
-./scripts/doctor.sh          # validates .env + auth and re-runs the test suite
+# 4. (Optional) Authenticate to Codex — only needed if you want Codex-backed threads
+#    Install the CLI: brew install codex   (or your package manager equivalent)
+#    Then pick ONE:
+codex login                  # OAuth into your ChatGPT/Codex subscription, OR
+# …set OPENAI_API_KEY in .env to use an API key
 
-# 5. Run
+# 5. Sanity check
+./scripts/doctor.sh          # validates .env + auth (Claude + Codex if reachable), re-runs the test suite
+
+# 6. Run
 npm run dev
 ```
 
@@ -118,6 +125,8 @@ npm run test        # run verification suite (no live tokens needed)
 npm run build       # compile to dist/
 ```
 
+For Codex: install the `codex` CLI directly (`brew install codex` or equivalent) and run `codex login` / `codex logout`. The wormhole spawns it as a subprocess; it isn't an npm dep of this repo.
+
 ---
 
 ## Project layout
@@ -137,20 +146,34 @@ src/
 │   ├── consent.ts        # destructive-command approval flow
 │   └── interactions.ts   # block_actions handler for buttons
 ├── agent/
-│   ├── manager.ts        # Map<threadKey, Session> + per-thread queue
-│   ├── session.ts        # Agent SDK query() wrapper
-│   ├── systemPrompt.ts   # agent persona / instructions
-│   ├── guards.ts         # destructive-command classifier
-│   ├── canUseTool.ts     # permission hook → consent flow
-│   ├── workdirStore.ts   # per-thread workdir overrides (data/workdirs.json)
+│   ├── manager.ts          # Map<threadKey, Session> + per-thread queue + runtime selection
+│   ├── session.ts          # Runtime-agnostic wrapper; holds one Runtime instance
+│   ├── systemPrompt.ts     # agent persona / instructions
+│   ├── guards.ts           # destructive-command classifier
+│   ├── canUseTool.ts       # Claude permission hook → consent flow
+│   ├── workdirStore.ts     # per-thread workdir overrides (data/workdirs.json)
+│   ├── runtimeStore.ts     # per-thread runtime overrides (data/runtimes.json)
+│   ├── runtime/
+│   │   ├── types.ts        # Runtime port + StreamHooks + TaskEvent
+│   │   ├── claude.ts       # ClaudeRuntime — Anthropic Agent SDK
+│   │   ├── codex.ts        # CodexRuntime — `codex exec` subprocess
+│   │   └── codexProcess.ts # spawn seam for Codex subprocess (test-injectable)
 │   └── tools/
-│       ├── slackPost.ts  # MCP tools: slack_post_message, slack_post_file
-│       ├── cron.ts       # MCP tools: cron_add, cron_list, cron_remove
-│       └── workdir.ts    # MCP tools: set_workdir, get_workdir, reset_workdir
+│       ├── types.ts        # runtime-neutral ToolDef shape
+│       ├── claudeMcp.ts    # Claude SDK MCP wrapper helper
+│       ├── slackPostDef.ts # tool defs (runtime-neutral)
+│       ├── slackPost.ts    # Claude MCP wrapper for slack_post_*
+│       ├── workdirDef.ts   # tool defs (runtime-neutral)
+│       ├── workdir.ts      # Claude MCP wrapper for set_workdir/get_workdir/reset_workdir
+│       ├── cronDef.ts      # tool defs (runtime-neutral)
+│       └── cron.ts         # Claude MCP wrapper for cron_*
+├── slack/
+│   ├── runtimeMatcher.ts   # "switch to codex" / "use claude" control-phrase detector
+│   └── ...                 # (handlers, heartbeat, stream, consent, etc — unchanged)
 └── scheduler/
-    ├── store.ts          # JSON-backed CronStore (data/crons.json)
-    ├── scheduler.ts      # node-cron wrapper: add/remove/start/stop
-    └── runner.ts         # fire handler: synthesize a thread + run the agent
+    ├── store.ts            # JSON-backed CronStore (data/crons.json)
+    ├── scheduler.ts        # node-cron wrapper: add/remove/start/stop
+    └── runner.ts           # fire handler: synthesize a thread + run the agent
 ```
 
 `scripts/`, `slack-manifest.yaml`, `.env.example`, and `TODO.md` (deferred features) live at the repo root.
@@ -162,8 +185,9 @@ src/
 See `TODO.md` for the deferred list. The big ones:
 
 - **Multi-workspace install** — single-workspace only for now (one set of tokens, no OAuth flow).
-- **Session persistence across restarts** — sessions are in-memory; restart loses the per-thread agent state (Slack messages stay, but the agent loses its context).
+- **Session persistence across restarts** — sessions are in-memory; restart loses the per-thread agent state (Slack messages stay, but the agent loses its context). Codex resumes by rollout UUID on disk, so Codex threads can survive bot restarts if the UUID is still pinned in `data/runtimes.json` — Claude threads lose context on restart.
 - **Stronger sandboxing** — the agent runs Bash on your laptop, scoped to `sessions/<threadKey>/`. The consent gate catches the common destructive patterns but is not a sandbox. Docker-per-session is sketched in TODO.
+- **Codex parity with Claude** — Codex threads don't yet see the wormhole's MCP tools (no `slack_post_file`, `set_workdir`, `cron_add`, sub-agents), and the destructive-command consent gate is coarser (sandbox-level, not per-call). See the **Picking a runtime** section of USAGE for the full delta.
 
 ---
 

@@ -13,6 +13,9 @@ import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
 import { markActive, unmarkActive } from "./activeMarker.js";
 import { isEndSessionPhrase } from "./endSessionMatcher.js";
+import { detectRuntimeSwitch } from "./runtimeMatcher.js";
+import { getRuntimeStore } from "../agent/runtimeStore.js";
+import { resolveRuntimeName } from "../agent/manager.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -91,6 +94,38 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       text: had
         ? "Session ended. The next message in this thread will start a fresh one."
         : "No active session in this thread (reaction cleared if present).",
+    });
+    return;
+  }
+
+  // Control phrase: runtime switch ("switch to codex", "use claude", etc).
+  // Same short-circuit pattern as end-session: tear down the existing
+  // in-memory session (so it doesn't keep streaming to Slack under the old
+  // runtime), persist the new choice to data/runtimes.json, and let the
+  // user's NEXT message spin up a session under the new runtime.
+  //
+  // Done before sessions.get to avoid the wasteful create-then-close that
+  // would otherwise happen, and to keep the active-marker reaction in
+  // sync (markActive only fires for newly-created sessions).
+  const switchTo = detectRuntimeSwitch(msg.text);
+  if (switchTo) {
+    inFlight.delete(dedupeKey);
+    const current = resolveRuntimeName(key);
+    if (current === switchTo) {
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: replyThreadTs,
+        text: `This thread is already on the \`${switchTo}\` runtime. Nothing changed.`,
+      });
+      return;
+    }
+    sessions.close(key);
+    await unmarkActive(client, msg.channel, replyThreadTs);
+    getRuntimeStore().set(key, switchTo);
+    await client.chat.postMessage({
+      channel: msg.channel,
+      thread_ts: replyThreadTs,
+      text: `Runtime for this thread switched to \`${switchTo}\`. Your next message will run under it.`,
     });
     return;
   }

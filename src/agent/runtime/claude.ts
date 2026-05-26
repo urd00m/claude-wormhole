@@ -1,0 +1,412 @@
+import { randomUUID } from "node:crypto";
+import {
+  query,
+  type CanUseTool,
+  type SDKMessage,
+  type McpSdkServerConfigWithInstance,
+  type Query,
+} from "@anthropic-ai/claude-agent-sdk";
+import { env } from "../../config.js";
+import { SYSTEM_PROMPT } from "../systemPrompt.js";
+import {
+  BACKGROUND_WORKER_TYPE,
+  computeChildDepth,
+  isSpawnTool,
+  MAX_SUBAGENT_DEPTH,
+  rewriteSpawnInput,
+  SUBAGENT_DISALLOWED_TOOLS,
+  SUBAGENT_TOOLS,
+} from "../subagentDepth.js";
+import type { Runtime, SessionInput, SessionOutput, StreamHooks } from "./types.js";
+
+/**
+ * Shape of the SDK's `query` export, minus the parts we don't use. Carved
+ * out so tests can inject a fake — the real `query` opens a CLI subprocess
+ * which is not viable in unit tests.
+ */
+export type QueryFn = (params: {
+  prompt: string | AsyncIterable<unknown>;
+  options?: Record<string, unknown>;
+}) => AsyncIterable<SDKMessage> | Query;
+
+export type ClaudeRuntimeOpts = {
+  threadKey: string;
+  workdir: string;
+  canUseTool?: CanUseTool;
+  mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+  /** Test seam — defaults to the real SDK `query`. */
+  queryFn?: QueryFn;
+};
+
+/**
+ * @deprecated Native Agent/Task is denied at the canUseTool gate
+ * (see `REDIRECTED_SPAWN_TOOLS` in canUseTool.ts); these AgentDefinitions
+ * are never invoked in normal operation. Retained so the SDK options
+ * shape and historical behavior stay buildable for reference / rollback.
+ *
+ * Override the built-in `general-purpose` sub-agent so it gets the full tool
+ * surface — Bash, file tools, web tools, AND the spawning tool (`Agent`),
+ * which the SDK's default for unconfigured `general-purpose` omits as a
+ * safety measure. Tools are listed explicitly here rather than via the
+ * "omit to inherit" semantic, because in practice that inheritance does
+ * NOT include Bash/Agent.
+ *
+ * Recursive sub-agent nesting is bounded by MAX_SUBAGENT_DEPTH, enforced
+ * in the canUseTool wrapper below.
+ */
+const SUBAGENT_PROMPT = `You are a general-purpose sub-agent launched by a parent agent. You have the full Claude Code tool surface — Bash, Read/Write/Edit, Grep/Glob, WebFetch/WebSearch — AND the Agent tool, so you may spawn further sub-agents (Planner / Critic / Verifier / workers) for parallel or context-isolated work. Recursive sub-agent depth is capped at ${MAX_SUBAGENT_DEPTH}; deeper spawns will be denied with a clear error. Be concise: do the work and report a tight, self-contained result to the parent.`;
+
+const BACKGROUND_WORKER_PROMPT = `You are a background sub-agent. Your invocation returned to the parent immediately — the parent is NOT waiting on your tool_result. Do the work, then write your final report to the file path provided by the SDK (or to a file in the working directory, mentioned in your final summary). The parent will see your completion via a task-notification event in its Slack thread. You have the full tool surface; nested-Agent depth is bounded at ${MAX_SUBAGENT_DEPTH}. Be self-contained — the parent has no way to ask you follow-ups, so commit any context you need into your summary.`;
+
+/**
+ * @deprecated See note above. Spawn-MCP is the only active sub-agent
+ * dispatch path; RECURSIVE_AGENTS is still passed to `query` for shape
+ * compatibility but is never reached because Agent/Task is denied.
+ */
+export const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent-sdk").AgentDefinition> = {
+  "general-purpose": {
+    description:
+      "General-purpose agent with the full Claude Code tool surface (Bash, Read/Write/Edit, Grep/Glob, web tools, AND the Agent/Task spawning tool) so it can run repo Python/Bash tooling, read project files, and recursively spawn further sub-agents (Planner / Plan-critic / Executor / Analyzer / Verifier / Verdict-critic workers) up to a depth cap.",
+    prompt: SUBAGENT_PROMPT,
+    tools: [...SUBAGENT_TOOLS],
+    disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
+    permissionMode: "bypassPermissions",
+  },
+  [BACKGROUND_WORKER_TYPE]: {
+    description:
+      "Fire-and-forget background worker. Use for long-running tasks (benchmarks, large builds, slow verifiers) where the parent should not wait on the result. The Agent tool returns immediately; completion is reported back into the Slack thread via a task-notification event when the worker finishes. Has the same full tool surface as general-purpose.",
+    prompt: BACKGROUND_WORKER_PROMPT,
+    tools: [...SUBAGENT_TOOLS],
+    disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
+    background: true,
+    permissionMode: "bypassPermissions",
+  },
+};
+
+/**
+ * Claude implementation of the Runtime port. Wraps the Claude Agent SDK's
+ * `query()` and consumes its message stream, translating SDK-specific events
+ * into runtime-neutral `StreamHooks`.
+ *
+ * Owns its own conversation-resume state: a UUID pinned per-thread, sent as
+ * `sessionId` on the first turn and `resume` on subsequent turns, so two
+ * threads sharing a workdir don't bleed conversation history into each
+ * other (the bug the cwd-based `continue: true` flag exhibited).
+ */
+export class ClaudeRuntime implements Runtime {
+  readonly name = "claude" as const;
+  readonly threadKey: string;
+  workdir: string;
+  private canUseTool?: CanUseTool;
+  private mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+  private hasStarted = false;
+  /**
+   * Stable SDK conversation identifier for THIS thread. Generated once at
+   * construction (rotated on setWorkdir / resetConversation). See the
+   * `sessionIsolation.test.ts` regression suite for the cross-thread-bleed
+   * scenario this guards against.
+   */
+  private sessionId: string;
+  private readonly queryFn: QueryFn;
+
+  constructor(opts: ClaudeRuntimeOpts) {
+    this.threadKey = opts.threadKey;
+    this.workdir = opts.workdir;
+    this.canUseTool = opts.canUseTool;
+    this.mcpServers = opts.mcpServers;
+    this.queryFn = opts.queryFn ?? (query as unknown as QueryFn);
+    this.sessionId = randomUUID();
+  }
+
+  setMcpServers(servers: Record<string, McpSdkServerConfigWithInstance>): void {
+    this.mcpServers = servers;
+  }
+
+  setCanUseTool(fn: CanUseTool): void {
+    this.canUseTool = fn;
+  }
+
+  setWorkdir(newWorkdir: string): void {
+    if (newWorkdir === this.workdir) return;
+    this.workdir = newWorkdir;
+    this.hasStarted = false;
+    this.sessionId = randomUUID();
+  }
+
+  resetConversation(): void {
+    this.hasStarted = false;
+    this.sessionId = randomUUID();
+  }
+
+  async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
+    const prompt = buildPrompt(input);
+
+    // Per-turn tool_use_id → spawned-child-depth map. Built incrementally as
+    // assistant messages stream in. Consulted by the canUseTool wrapper to
+    // deny Task calls past MAX_SUBAGENT_DEPTH.
+    const childDepthByToolUseId = new Map<string, number>();
+    const userCanUseTool = this.canUseTool;
+
+    // Set of tool_use_ids that were Agent calls with subagent_type ===
+    // BACKGROUND_WORKER_TYPE. Used both by the canUseTool wrapper (to
+    // mark mid-flight bg dispatches) and by the message-stream loop (to
+    // surface only bg task lifecycle events).
+    const backgroundToolUseIds = new Set<string>();
+    const backgroundTaskIds = new Set<string>();
+
+    const wrappedCanUseTool: CanUseTool = async (toolName, toolInput, options) => {
+      let effectiveInput = toolInput;
+      // DEPRECATED: this branch handles depth-capping and run_in_background
+      // rewriting for native Agent/Task calls. Native Agent/Task is now
+      // denied earlier by `buildCanUseTool` (REDIRECTED_SPAWN_TOOLS), so
+      // the branch is unreachable in normal operation. Kept (a) so the
+      // historical wiring stays buildable and reviewable, (b) as a
+      // belt-and-suspenders depth cap if someone ever re-enables Agent
+      // without re-thinking the gate.
+      if (isSpawnTool(toolName)) {
+        const childDepth = childDepthByToolUseId.get(options.toolUseID) ?? 1;
+        if (childDepth > MAX_SUBAGENT_DEPTH) {
+          return {
+            behavior: "deny",
+            message: `sub-agent depth ${childDepth} exceeds cap ${MAX_SUBAGENT_DEPTH}`,
+          };
+        }
+        const { input: rewritten, isBackground } = rewriteSpawnInput(toolInput);
+        effectiveInput = rewritten;
+        if (isBackground) backgroundToolUseIds.add(options.toolUseID);
+      }
+      if (userCanUseTool) {
+        const result = await userCanUseTool(toolName, effectiveInput, options);
+        if (result.behavior === "allow" && isSpawnTool(toolName)) {
+          return { behavior: "allow", updatedInput: effectiveInput };
+        }
+        return result;
+      }
+      return { behavior: "allow", updatedInput: effectiveInput };
+    };
+
+    // Pin THIS thread's conversation to its own SDK session_id. On the
+    // first send we set `sessionId` (start fresh with our chosen UUID);
+    // on subsequent sends we set `resume: sessionId` (continue our own
+    // session by ID, NOT by cwd-most-recent). This eliminates cross-thread
+    // bleed when multiple Slack threads happen to share a workdir.
+    //
+    // Capture BOTH the id and the "is-first-send" flag here, because a
+    // mid-turn `set_workdir` (via the workdir MCP tool) can mutate
+    // `this.sessionId` and reset `this.hasStarted` to false while THIS
+    // send is still streaming. The SDK call we hand to the CLI uses the
+    // id we capture *now*, not whatever it gets rotated to later.
+    const sessionIdAtStart = this.sessionId;
+    const wasFirstSend = !this.hasStarted;
+    const sessionIdField = wasFirstSend
+      ? { sessionId: sessionIdAtStart }
+      : { resume: sessionIdAtStart };
+
+    const q = this.queryFn({
+      prompt,
+      options: {
+        cwd: this.workdir,
+        model: env.ANTHROPIC_MODEL,
+        systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
+        tools: { type: "preset", preset: "claude_code" },
+        // AskUserQuestion ships a picker UI in interactive Claude Code, but
+        // the wormhole has no Slack surface for it: under bypassPermissions
+        // the CLI returns an empty answer and the model loops asking again
+        // ("Empty answer again"). Drop it from the model's tool surface;
+        // the system prompt tells the model to ask in plain text instead.
+        disallowedTools: ["AskUserQuestion"],
+        agents: RECURSIVE_AGENTS,
+        ...sessionIdField,
+        canUseTool: wrappedCanUseTool,
+        mcpServers: this.mcpServers,
+        includePartialMessages: true,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        additionalDirectories: ["/"],
+        env: buildChildEnv(),
+      },
+    });
+
+    let finalText = "";
+    const seenToolStarts = new Set<string>();
+
+    for await (const msg of q as AsyncIterable<SDKMessage>) {
+      // Sub-agent messages carry a non-null parent_tool_use_id. Skip
+      // user-visible side effects for them so the parent thread's stream,
+      // final-text capture, and tool strip reflect only the main agent.
+      const parentToolUseId =
+        "parent_tool_use_id" in msg
+          ? (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null
+          : null;
+      const isSubAgent = parentToolUseId != null;
+
+      // Depth bookkeeping runs for ALL assistant messages (sub-agent or not)
+      // so the cap fires on nested Task calls. Also classify each Agent
+      // call as background vs foreground based on the requested
+      // subagent_type, so the system-message handler below knows whether
+      // to surface it.
+      if (msg.type === "assistant") {
+        const content = msg.message?.content ?? [];
+        for (const block of content) {
+          if (block.type === "tool_use" && isSpawnTool(block.name)) {
+            const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
+            childDepthByToolUseId.set(block.id, depth);
+            const { isBackground } = rewriteSpawnInput(
+              (block.input ?? {}) as Record<string, unknown>,
+            );
+            if (isBackground) backgroundToolUseIds.add(block.id);
+          }
+        }
+      }
+
+      switch (msg.type) {
+        case "stream_event": {
+          if (isSubAgent) break;
+          const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } };
+          if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
+            hooks.onText?.(ev.delta.text);
+          }
+          break;
+        }
+        case "assistant": {
+          if (isSubAgent) break;
+          const content = msg.message?.content ?? [];
+          for (const block of content) {
+            if (block.type === "text") {
+              finalText = block.text;
+            } else if (block.type === "tool_use") {
+              if (!seenToolStarts.has(block.id)) {
+                seenToolStarts.add(block.id);
+                hooks.onToolStart?.(block.id, block.name, (block.input ?? {}) as Record<string, unknown>);
+              }
+            }
+          }
+          break;
+        }
+        case "user": {
+          if (isSubAgent) break;
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
+                const tr = block as { tool_use_id?: string; is_error?: boolean };
+                if (tr.tool_use_id) {
+                  hooks.onToolEnd?.(tr.tool_use_id, !tr.is_error);
+                }
+              }
+            }
+          }
+          break;
+        }
+        case "result": {
+          const r = msg as { subtype?: string; result?: string };
+          if (r.subtype === "success" && typeof r.result === "string") {
+            finalText = r.result;
+          }
+          break;
+        }
+        case "system": {
+          const s = msg as {
+            subtype?: string;
+            task_id?: string;
+            tool_use_id?: string;
+            description?: string;
+            subagent_type?: string;
+            summary?: string;
+            status?: "completed" | "failed" | "stopped";
+            patch?: { status?: string; error?: string };
+          };
+          const tuid = s.tool_use_id;
+          const isBackground =
+            (tuid != null && backgroundToolUseIds.has(tuid)) ||
+            (s.task_id != null && backgroundTaskIds.has(s.task_id));
+          if (!isBackground) break;
+          if (s.task_id) backgroundTaskIds.add(s.task_id);
+
+          switch (s.subtype) {
+            case "task_started":
+              if (s.task_id) {
+                hooks.onTaskEvent?.({
+                  kind: "started",
+                  taskId: s.task_id,
+                  toolUseId: tuid,
+                  description: s.description ?? "(no description)",
+                  subagentType: s.subagent_type,
+                });
+              }
+              break;
+            case "task_progress":
+              if (s.task_id) {
+                hooks.onTaskEvent?.({
+                  kind: "progress",
+                  taskId: s.task_id,
+                  toolUseId: tuid,
+                  description: s.description ?? "",
+                  summary: s.summary,
+                });
+              }
+              break;
+            case "task_notification":
+              if (s.task_id && s.status) {
+                hooks.onTaskEvent?.({
+                  kind: "notification",
+                  taskId: s.task_id,
+                  toolUseId: tuid,
+                  status: s.status,
+                  summary: s.summary ?? "",
+                });
+              }
+              break;
+            default:
+              break;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    // Only mark "started" against the sessionId we actually handed to the
+    // SDK above. If `setWorkdir` ran mid-turn it rotated `this.sessionId`
+    // to a fresh UUID that was NEVER used to open a conversation — leaving
+    // `hasStarted=false` (as setWorkdir already did) lets the next send
+    // start that UUID cleanly with `{ sessionId }`. See
+    // sessionIsolation.test.ts for the regression scenario.
+    if (this.sessionId === sessionIdAtStart) {
+      this.hasStarted = true;
+    }
+    const out = finalText || "_(no response)_";
+    hooks.onFinal?.(out);
+    return { finalText: out };
+  }
+}
+
+/**
+ * Build the env passed to the Claude Code subprocess. If ANTHROPIC_API_KEY is
+ * set, use it. If not, omit the var entirely so the subprocess falls back to
+ * OAuth credentials at ~/.claude/ (i.e., a Claude Pro/Max subscription).
+ */
+function buildChildEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  if (env.ANTHROPIC_API_KEY) {
+    out.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
+  } else {
+    delete out.ANTHROPIC_API_KEY;
+  }
+  return out;
+}
+
+function buildPrompt(input: SessionInput): string {
+  const parts: string[] = [];
+  if (input.attachments && input.attachments.length > 0) {
+    parts.push(`User uploaded files (in ./uploads/):`);
+    for (const a of input.attachments) parts.push(`- ${a}`);
+    parts.push("");
+  }
+  parts.push(input.text);
+  return parts.join("\n");
+}

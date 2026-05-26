@@ -19,6 +19,8 @@ TESTS=(
   src/agent/sessionIsolation.test.ts
   src/agent/spawnFlow.test.ts
   src/agent/sessionStream.test.ts
+  src/agent/runtime/claude.test.ts
+  src/agent/runtime/codex.test.ts
   src/slack/heartbeat.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
@@ -31,7 +33,15 @@ TESTS=(
   src/slack/activeMarker.test.ts
   src/scheduler/scheduler.test.ts
   src/agent/workdirStore.test.ts
+  src/agent/runtimeStore.test.ts
+  src/agent/managerRuntime.test.ts
+  src/slack/runtimeMatcher.test.ts
   src/agent/tools/slackPost.test.ts
+  src/agent/tools/claudeMcp.test.ts
+  src/agent/tools/slackPostDef.test.ts
+  src/agent/tools/workdirDef.test.ts
+  src/agent/tools/cronDef.test.ts
+  src/configCodex.test.ts
 )
 
 for t in "${TESTS[@]}"; do

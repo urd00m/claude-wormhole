@@ -49,6 +49,39 @@ else
   FAIL=1
 fi
 
+# Codex auth — only required when Codex is reachable. We treat it as
+# "reachable" whenever DEFAULT_RUNTIME is codex OR any thread in
+# data/runtimes.json is pinned to codex. Otherwise the check is a soft hint.
+DEFAULT_RT=${DEFAULT_RUNTIME:-claude}
+CODEX_REACHABLE=0
+if [ "$DEFAULT_RT" = "codex" ]; then
+  CODEX_REACHABLE=1
+fi
+if [ -f data/runtimes.json ] && grep -q '"codex"' data/runtimes.json 2>/dev/null; then
+  CODEX_REACHABLE=1
+fi
+
+CODEX_CREDS="$HOME/.codex/auth.json"
+CODEX_CREDS_ALT="$HOME/.codex/credentials.json"
+if [ "$CODEX_REACHABLE" -eq 1 ]; then
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    ok "Codex auth: OPENAI_API_KEY set"
+  elif [ -f "$CODEX_CREDS" ] || [ -f "$CODEX_CREDS_ALT" ]; then
+    ok "Codex auth: subscription credentials present (~/.codex/)"
+  else
+    err "Codex auth: DEFAULT_RUNTIME=codex (or a thread is pinned to codex) but neither OPENAI_API_KEY nor ~/.codex/ credentials found — run 'codex login' or set OPENAI_API_KEY"
+    FAIL=1
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    ok "Codex CLI: \`codex\` on PATH"
+  else
+    err "Codex CLI: \`codex\` not on PATH — install it before running threads under the codex runtime"
+    FAIL=1
+  fi
+else
+  ok "Codex auth: not required (DEFAULT_RUNTIME=$DEFAULT_RT, no codex threads in data/runtimes.json)"
+fi
+
 step "Type-check"
 if npx tsc --noEmit; then ok "clean"; else err "type errors"; FAIL=1; fi
 
