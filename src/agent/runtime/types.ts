@@ -23,16 +23,22 @@ export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * Per-session launch overrides carried by an alias (see agent/aliasStore.ts).
- * Runtime-neutral; each runtime applies what it can:
- *   - model  → Claude SDK `model` / Codex `-m`
- *   - effort → Claude SDK `effort` / Codex `-c model_reasoning_effort=<level>`
- *   - args   → Codex: extra `codex exec` argv (full pass-through);
- *              Claude: NOT applicable (SDK takes no raw CLI flags) — ignored.
+ * Runtime-neutral; each runtime applies what it can. The two runtimes take
+ * raw CLI args in different shapes, so each has its own field — the alias's
+ * `runtime` decides which one is honored (the other is ignored):
+ *   - model      → Claude SDK `model` / Codex `-m`
+ *   - effort     → Claude SDK `effort` / Codex `-c model_reasoning_effort=<level>`
+ *   - codexArgs  → Codex only: extra `codex exec` argv tokens (pass-through).
+ *   - claudeArgs → Claude only: forwarded to the `claude` process via the SDK's
+ *                  `extraArgs` (flag name WITHOUT `--`; value, or null for a
+ *                  boolean flag). e.g. { "fallback-model": "claude-sonnet-4-6",
+ *                  "verbose": null }.
  */
 export type AgentLaunchConfig = {
   model?: string;
   effort?: EffortLevel;
-  args?: string[];
+  codexArgs?: string[];
+  claudeArgs?: Record<string, string | null>;
 };
 
 export type SessionOutput = {

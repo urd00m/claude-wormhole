@@ -628,7 +628,7 @@ async function main() {
     const rt = new CodexRuntime({
       threadKey: "t-launch",
       workdir: TMP_ROOT,
-      launch: { model: "gpt-5", effort: "high", args: ["-c", "sandbox_mode=read-only"] },
+      launch: { model: "gpt-5", effort: "high", codexArgs: ["-c", "sandbox_mode=read-only"] },
       processFactory: makeFactory(captured, [
         {
           lines: [metaLine("launch"), agentMessageLine("ok"), taskCompleteLine("ok")],

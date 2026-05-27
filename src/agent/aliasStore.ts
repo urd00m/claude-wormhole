@@ -26,12 +26,15 @@ export type AliasDef = {
   runtime: RuntimeName;
   model?: string;
   effort?: EffortLevel;
-  args?: string[];
+  /** Codex only: extra `codex exec` argv tokens. */
+  codexArgs?: string[];
+  /** Claude only: SDK extraArgs (flag without `--` → value, or null for boolean). */
+  claudeArgs?: Record<string, string | null>;
 };
 
 /** The launch config an alias contributes (everything except runtime). */
 export function launchConfigOf(def: AliasDef): AgentLaunchConfig {
-  return { model: def.model, effort: def.effort, args: def.args };
+  return { model: def.model, effort: def.effort, codexArgs: def.codexArgs, claudeArgs: def.claudeArgs };
 }
 
 export class AliasStore {
@@ -99,7 +102,17 @@ function validateDef(raw: unknown): AliasDef | null {
   const def: AliasDef = { runtime: r.runtime as RuntimeName };
   if (typeof r.model === "string" && r.model.length > 0) def.model = r.model;
   if (typeof r.effort === "string" && VALID_EFFORTS.has(r.effort)) def.effort = r.effort as EffortLevel;
-  if (Array.isArray(r.args) && r.args.every((a) => typeof a === "string")) def.args = r.args as string[];
+  if (Array.isArray(r.codexArgs) && r.codexArgs.every((a) => typeof a === "string")) {
+    def.codexArgs = r.codexArgs as string[];
+  }
+  // claudeArgs: a flat object of string|null values (SDK extraArgs shape).
+  if (typeof r.claudeArgs === "object" && r.claudeArgs !== null && !Array.isArray(r.claudeArgs)) {
+    const ca: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(r.claudeArgs as Record<string, unknown>)) {
+      if (v === null || typeof v === "string") ca[k] = v as string | null;
+    }
+    if (Object.keys(ca).length > 0) def.claudeArgs = ca;
+  }
   return def;
 }
 

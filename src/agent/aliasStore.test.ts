@@ -29,15 +29,24 @@ async function main() {
     fs.writeFileSync(
       f,
       JSON.stringify({
-        custom_claude: { runtime: "claude", model: "claude-opus-4-7", effort: "high" },
-        custom_codex: { runtime: "codex", model: "gpt-5", effort: "medium", args: ["-c", "x=y"] },
+        custom_claude: {
+          runtime: "claude",
+          model: "claude-opus-4-7",
+          effort: "high",
+          claudeArgs: { "fallback-model": "claude-sonnet-4-6", verbose: null },
+        },
+        custom_codex: { runtime: "codex", model: "gpt-5", effort: "medium", codexArgs: ["-c", "x=y"] },
       }),
     );
     const s = new AliasStore(f);
     const cc = s.get("custom_claude");
     assert(cc?.runtime === "claude" && cc.model === "claude-opus-4-7" && cc.effort === "high", "claude def");
+    assert(
+      cc?.claudeArgs?.["fallback-model"] === "claude-sonnet-4-6" && cc.claudeArgs.verbose === null,
+      `claudeArgs parsed (string + null): ${JSON.stringify(cc?.claudeArgs)}`,
+    );
     const cx = s.get("custom_codex");
-    assert(cx?.runtime === "codex" && JSON.stringify(cx.args) === JSON.stringify(["-c", "x=y"]), "codex def + args");
+    assert(cx?.runtime === "codex" && JSON.stringify(cx.codexArgs) === JSON.stringify(["-c", "x=y"]), "codex def + codexArgs");
     assert(s.names().sort().join(",") === "custom_claude,custom_codex", "names()");
   }
 
@@ -125,10 +134,32 @@ async function main() {
 
   // ============ launchConfigOf ============
   {
-    const def: AliasDef = { runtime: "codex", model: "gpt-5", effort: "high", args: ["-c", "a=b"] };
+    const def: AliasDef = {
+      runtime: "codex",
+      model: "gpt-5",
+      effort: "high",
+      codexArgs: ["-c", "a=b"],
+      claudeArgs: { verbose: null },
+    };
     const lc = launchConfigOf(def);
-    assert(lc.model === "gpt-5" && lc.effort === "high" && JSON.stringify(lc.args) === JSON.stringify(["-c", "a=b"]), "launchConfigOf maps fields");
+    assert(lc.model === "gpt-5" && lc.effort === "high", "launchConfigOf maps model/effort");
+    assert(JSON.stringify(lc.codexArgs) === JSON.stringify(["-c", "a=b"]), "maps codexArgs");
+    assert(lc.claudeArgs?.verbose === null, "maps claudeArgs");
     assert(!("runtime" in lc), "launch config excludes runtime");
+  }
+
+  // --- claudeArgs validation: non-string/non-null values dropped ---
+  {
+    const f = path.join(tmp, "cargs.json");
+    fs.writeFileSync(
+      f,
+      JSON.stringify({
+        a: { runtime: "claude", claudeArgs: { good: "v", boolean: null, bad: 5, alsobad: { x: 1 } } },
+      }),
+    );
+    const def = new AliasStore(f).get("a");
+    assert(def?.claudeArgs?.good === "v" && def.claudeArgs.boolean === null, "valid claudeArgs kept");
+    assert(!("bad" in (def!.claudeArgs ?? {})) && !("alsobad" in (def!.claudeArgs ?? {})), "non-string/null claudeArgs dropped");
   }
 
   // ============ decideLaunch (pure resolution) ============

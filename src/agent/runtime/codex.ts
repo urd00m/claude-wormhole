@@ -309,7 +309,7 @@ export class CodexRuntime implements Runtime {
       workdir: this.workdir,
       model: this.launch?.model ?? env.OPENAI_MODEL,
       effort: this.launch?.effort,
-      extraArgs: this.launch?.args,
+      extraArgs: this.launch?.codexArgs,
       lastMessageFile,
       prompt,
     });

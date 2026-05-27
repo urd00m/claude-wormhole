@@ -474,22 +474,29 @@ async function main() {
     const rt = new ClaudeRuntime({
       threadKey: "thread_launch",
       workdir: "/x",
-      launch: { model: "claude-opus-4-7", effort: "high", args: ["--ignored-by-sdk"] },
+      launch: {
+        model: "claude-opus-4-7",
+        effort: "high",
+        claudeArgs: { "fallback-model": "claude-sonnet-4-6", verbose: null },
+      },
       queryFn: capturingQuery(captured),
     });
     await rt.send({ text: "hi" });
     assert(captured[0].model === "claude-opus-4-7", `launch model → options.model: ${captured[0].model}`);
     assert(captured[0].effort === "high", `launch effort → options.effort: ${captured[0].effort}`);
-    // `args` are intentionally not applied to the SDK path — no raw CLI flag leaks in.
-    assert(!("args" in captured[0]), "alias args not passed to SDK options");
+    // claudeArgs are forwarded to the claude process via the SDK's extraArgs.
+    const extraArgs = captured[0].extraArgs as Record<string, string | null> | undefined;
+    assert(extraArgs?.["fallback-model"] === "claude-sonnet-4-6", `claudeArgs → extraArgs value: ${JSON.stringify(extraArgs)}`);
+    assert(extraArgs?.verbose === null, "claudeArgs boolean flag → extraArgs null");
   }
 
-  // --- (18) no launch config → effort absent, model falls back to env ---
+  // --- (18) no launch config → effort + extraArgs absent, model from env ---
   {
     const captured: Record<string, unknown>[] = [];
     const rt = new ClaudeRuntime({ threadKey: "thread_nolaunch", workdir: "/x", queryFn: capturingQuery(captured) });
     await rt.send({ text: "hi" });
     assert(captured[0].effort === undefined, "no launch → no effort option");
+    assert(captured[0].extraArgs === undefined, "no launch → no extraArgs option");
     assert(typeof captured[0].model === "string" && (captured[0].model as string).length > 0, "model defaulted from env");
   }
 

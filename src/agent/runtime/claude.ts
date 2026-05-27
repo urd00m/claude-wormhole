@@ -223,10 +223,11 @@ export class ClaudeRuntime implements Runtime {
       options: {
         cwd: this.workdir,
         model: this.launch?.model ?? env.ANTHROPIC_MODEL,
-        // Alias-supplied reasoning effort (SDK option). `args` from the
-        // alias are intentionally NOT applied — the SDK takes no raw CLI
-        // flags, so a Claude alias is limited to model + effort.
+        // Alias-supplied reasoning effort (SDK option).
         ...(this.launch?.effort ? { effort: this.launch.effort } : {}),
+        // Alias-supplied raw CLI flags, forwarded to the `claude` process
+        // via the SDK's extraArgs (keys without `--`, null = boolean flag).
+        ...(this.launch?.claudeArgs ? { extraArgs: this.launch.claudeArgs } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         // AskUserQuestion ships a picker UI in interactive Claude Code, but
