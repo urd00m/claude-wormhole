@@ -14,7 +14,13 @@ import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
 import type { TaskEvent } from "../session.js";
 import { CodexRuntime } from "../runtime/codex.js";
 import type { CodexProcessFactory } from "../runtime/codexProcess.js";
-import { getResidentWorkerRegistry } from "../residentWorkerRegistry.js";
+import { getResidentWorkerRegistry, type ResidentWorkerRegistry } from "../residentWorkerRegistry.js";
+
+/** Result shape shared by the resident-worker tool handlers. */
+export type SpawnToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
 
 /**
  * Context for one level of the spawn-MCP hierarchy. `depth` is THIS MCP's
@@ -48,6 +54,13 @@ export type SpawnCtx = {
    * without invoking the real `codex` CLI.
    */
   codexProcessFactory?: CodexProcessFactory;
+  /**
+   * Test seam — overrides the resident-worker registry. Production omits
+   * this and the global singleton is used (so resident workers persist
+   * across messages). Tests inject a registry wired with a fake worker
+   * factory to exercise the resident tool handlers without real Claude.
+   */
+  residentRegistry?: ResidentWorkerRegistry;
 };
 
 /**
@@ -224,7 +237,7 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
       // invocations. Routed entirely through the registry; the one-shot
       // background/runtime machinery below does not apply.
       if (resident === true) {
-        return handleResidentSpawn(ctx, { prompt, name });
+        return handleResidentSpawn(ctx, { prompt, name }, ctx.residentRegistry ?? getResidentWorkerRegistry());
       }
 
       const workerRuntime: "claude" | "codex" = runtime ?? "claude";
@@ -333,8 +346,9 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
   // Only meaningful at the top spawn level (where ctx.threadKey is set).
   // Nested spawn MCPs don't own resident workers, so we omit these tools
   // for them to keep the sub-agent surface clean.
+  const residentRegistry = ctx.residentRegistry ?? getResidentWorkerRegistry();
   const managementTools = ctx.threadKey
-    ? [buildWorkerListTool(ctx.threadKey), buildWorkerKillTool(ctx.threadKey)]
+    ? [buildWorkerListTool(residentRegistry, ctx.threadKey), buildWorkerKillTool(residentRegistry, ctx.threadKey)]
     : [];
 
   return createSdkMcpServer({
@@ -350,11 +364,15 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
  * this thread's Slack MCP + consent gate so it can post back and stays
  * gated), or routes the prompt to the already-warm worker. Returns the
  * worker's reply synchronously — the worker stays alive afterward.
+ *
+ * Exported + registry-injected so the resident tool path can be unit-tested
+ * with a fake registry (no real Claude process).
  */
-async function handleResidentSpawn(
+export async function handleResidentSpawn(
   ctx: SpawnCtx,
   args: { prompt: string; name?: string },
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  registry: ResidentWorkerRegistry,
+): Promise<SpawnToolResult> {
   if (!args.name || args.name.trim().length === 0) {
     return {
       content: [
@@ -378,7 +396,6 @@ async function handleResidentSpawn(
     };
   }
 
-  const registry = getResidentWorkerRegistry();
   const worker = registry.getOrCreate({
     name: args.name,
     ownerThread: ctx.threadKey,
@@ -399,46 +416,56 @@ async function handleResidentSpawn(
   }
 }
 
-function buildWorkerListTool(threadKey: string) {
+/** Pure formatter for worker_list output. Exported for tests. */
+export function formatWorkerList(registry: ResidentWorkerRegistry, threadKey: string): SpawnToolResult {
+  const infos = registry.list(threadKey);
+  if (infos.length === 0) {
+    return { content: [{ type: "text", text: "No resident workers in this thread." }] };
+  }
+  const lines = infos.map((w) => {
+    const bits = [`• \`${w.name}\` — ${w.status}`, `  created: ${w.createdAt}`];
+    if (w.lastRunAt) bits.push(`  last run: ${w.lastRunAt}`);
+    if (w.lastError) bits.push(`  last error: ${w.lastError}`);
+    return bits.join("\n");
+  });
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
+/** Pure handler for worker_kill. Exported for tests. */
+export function killResidentWorker(
+  registry: ResidentWorkerRegistry,
+  threadKey: string,
+  name: string,
+): SpawnToolResult {
+  const killed = registry.kill(threadKey, name);
+  return {
+    content: [
+      {
+        type: "text",
+        text: killed
+          ? `Killed resident worker \`${name}\`.`
+          : `No live resident worker named \`${name}\` in this thread.`,
+      },
+    ],
+    isError: !killed,
+  };
+}
+
+function buildWorkerListTool(registry: ResidentWorkerRegistry, threadKey: string) {
   return tool(
     "worker_list",
     "List the resident sub-agent workers owned by this Slack thread, with their status (idle / running / dead), creation time, and last-run time. Resident workers are created via spawn with resident: true + a name.",
     {},
-    async () => {
-      const infos = getResidentWorkerRegistry().list(threadKey);
-      if (infos.length === 0) {
-        return { content: [{ type: "text", text: "No resident workers in this thread." }] };
-      }
-      const lines = infos.map((w) => {
-        const bits = [`• \`${w.name}\` — ${w.status}`, `  created: ${w.createdAt}`];
-        if (w.lastRunAt) bits.push(`  last run: ${w.lastRunAt}`);
-        if (w.lastError) bits.push(`  last error: ${w.lastError}`);
-        return bits.join("\n");
-      });
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    },
+    async () => formatWorkerList(registry, threadKey),
   );
 }
 
-function buildWorkerKillTool(threadKey: string) {
+function buildWorkerKillTool(registry: ResidentWorkerRegistry, threadKey: string) {
   return tool(
     "worker_kill",
     "Kill a resident sub-agent worker by name. Terminates its held-open process and frees the name for reuse. Use worker_list to see names.",
     { name: z.string().describe("Name of the resident worker to kill.") },
-    async ({ name }) => {
-      const killed = getResidentWorkerRegistry().kill(threadKey, name);
-      return {
-        content: [
-          {
-            type: "text",
-            text: killed
-              ? `Killed resident worker \`${name}\`.`
-              : `No live resident worker named \`${name}\` in this thread.`,
-          },
-        ],
-        isError: !killed,
-      };
-    },
+    async ({ name }) => killResidentWorker(registry, threadKey, name),
   );
 }
 
