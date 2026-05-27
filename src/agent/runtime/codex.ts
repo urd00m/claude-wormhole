@@ -62,12 +62,21 @@ import {
   type CodexProcess,
   type CodexProcessFactory,
 } from "./codexProcess.js";
+import { codexSpawnMcpFlags } from "./codexSpawnMcp.js";
 
 export type CodexRuntimeOpts = {
   threadKey: string;
   workdir: string;
   /** Per-session launch overrides (from an alias): model, effort, extra args. */
   launch?: AgentLaunchConfig;
+  /**
+   * Attach the wormhole spawn MCP server so this codex worker can launch
+   * further agents (not one-shot). Used for spawned codex workers; the
+   * top-level thread session leaves it off. `spawnDepth` is this worker's
+   * depth (children spawn at depth+1, capped at MAX_SUBAGENT_DEPTH).
+   */
+  enableSpawnMcp?: boolean;
+  spawnDepth?: number;
   /** Test seam — defaults to the real `codex` subprocess factory. */
   processFactory?: CodexProcessFactory;
   /**
@@ -275,6 +284,8 @@ export class CodexRuntime implements Runtime {
   workdir: string;
   private sessionId: string | null = null;
   private readonly launch?: AgentLaunchConfig;
+  private readonly enableSpawnMcp: boolean;
+  private readonly spawnDepth: number;
   private readonly processFactory: CodexProcessFactory;
   private readonly lastMessageFileFactory: () => string;
 
@@ -282,6 +293,8 @@ export class CodexRuntime implements Runtime {
     this.threadKey = opts.threadKey;
     this.workdir = opts.workdir;
     this.launch = opts.launch;
+    this.enableSpawnMcp = opts.enableSpawnMcp ?? false;
+    this.spawnDepth = opts.spawnDepth ?? 0;
     this.processFactory = opts.processFactory ?? spawnCodexProcess;
     this.lastMessageFileFactory = opts.lastMessageFileFactory ?? defaultLastMessageFile;
   }
@@ -304,12 +317,20 @@ export class CodexRuntime implements Runtime {
     const prompt = buildPrompt(input);
     const sessionIdAtStart = this.sessionId;
 
+    // When spawn-MCP is enabled, attach the wormhole spawn server so this
+    // codex worker can launch further agents. Its `-c mcp_servers…` flags
+    // join the alias's extra args, and its WORMHOLE_SPAWN_* env joins the
+    // subprocess env.
+    const spawn = this.enableSpawnMcp
+      ? codexSpawnMcpFlags(this.spawnDepth, this.workdir)
+      : { args: [] as string[], env: {} as Record<string, string> };
+
     const args = buildArgs({
       resumeFrom: sessionIdAtStart,
       workdir: this.workdir,
       model: this.launch?.model ?? env.OPENAI_MODEL,
       effort: this.launch?.effort,
-      extraArgs: this.launch?.codexArgs,
+      extraArgs: [...(this.launch?.codexArgs ?? []), ...spawn.args],
       lastMessageFile,
       prompt,
     });
@@ -317,7 +338,7 @@ export class CodexRuntime implements Runtime {
     const proc: CodexProcess = this.processFactory({
       args,
       cwd: this.workdir,
-      env: buildCodexEnv(),
+      env: { ...buildCodexEnv(), ...spawn.env },
     });
 
     let observedSessionId: string | null = null;

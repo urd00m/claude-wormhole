@@ -652,12 +652,69 @@ async function main() {
     assert(sandboxIdx > 0 && sandboxIdx < sep, `extra alias args spliced before --: ${args.join(" ")}`);
   }
 
+  // --- (13) enableSpawnMcp → wormhole_spawn MCP flags + WORMHOLE_SPAWN_* env
+  {
+    const captured: CapturedSpawn[] = [];
+    const lastFile = lastMsgPathFor("spawnmcp");
+    const rt = new CodexRuntime({
+      threadKey: "t-spawnmcp",
+      workdir: TMP_ROOT,
+      enableSpawnMcp: true,
+      spawnDepth: 1,
+      processFactory: makeFactory(captured, [
+        {
+          lines: [metaLine("smcp"), agentMessageLine("ok"), taskCompleteLine("ok")],
+          beforeRun: async () => fs.writeFile(lastFile, "ok"),
+        },
+      ]),
+      lastMessageFileFactory: () => lastFile,
+    });
+    await rt.send({ text: "hi" });
+    const args = captured[0].args;
+    // The -c mcp_servers.wormhole_spawn.command + .args flags are present.
+    assert(
+      args.some((a) => a.startsWith("mcp_servers.wormhole_spawn.command=")),
+      `spawn MCP command flag present: ${args.join(" ")}`,
+    );
+    assert(
+      args.some((a) => a.startsWith("mcp_servers.wormhole_spawn.args=")),
+      "spawn MCP args flag present",
+    );
+    // The recursion env is set so the spawned server knows its depth + paths.
+    assert(captured[0].env.WORMHOLE_SPAWN_DEPTH === "1", `WORMHOLE_SPAWN_DEPTH: ${captured[0].env.WORMHOLE_SPAWN_DEPTH}`);
+    assert(typeof captured[0].env.WORMHOLE_SPAWN_SERVER === "string" && captured[0].env.WORMHOLE_SPAWN_SERVER.length > 0, "server path env set");
+    assert(typeof captured[0].env.WORMHOLE_SPAWN_TSX === "string", "tsx path env set");
+  }
+
+  // --- (14) no enableSpawnMcp → no spawn MCP flags (default off) ---
+  {
+    const captured: CapturedSpawn[] = [];
+    const lastFile = lastMsgPathFor("nospawnmcp");
+    const rt = new CodexRuntime({
+      threadKey: "t-nospawnmcp",
+      workdir: TMP_ROOT,
+      processFactory: makeFactory(captured, [
+        {
+          lines: [metaLine("nsmcp"), agentMessageLine("ok"), taskCompleteLine("ok")],
+          beforeRun: async () => fs.writeFile(lastFile, "ok"),
+        },
+      ]),
+      lastMessageFileFactory: () => lastFile,
+    });
+    await rt.send({ text: "hi" });
+    assert(
+      !captured[0].args.some((a) => a.startsWith("mcp_servers.wormhole_spawn")),
+      "no spawn MCP flags when disabled",
+    );
+    assert(captured[0].env.WORMHOLE_SPAWN_DEPTH === undefined, "no spawn env when disabled");
+  }
+
   // Cleanup tmp tree.
   await fs.rm(TMP_ROOT, { recursive: true, force: true });
 
   console.log(
     "✅ CodexRuntime verified — port, fresh exec, exec resume pinning, workdir/reset rotation, " +
-      "non-zero exit propagation, dangling rollout recovery, defensive parsing, sentinel final, attachments, launch-config",
+      "non-zero exit propagation, dangling rollout recovery, defensive parsing, sentinel final, attachments, launch-config, spawn-mcp",
   );
 }
 

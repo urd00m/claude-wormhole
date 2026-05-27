@@ -184,6 +184,11 @@ export async function runCodexWorker(
     const rt = new CodexRuntime({
       threadKey: `spawn-${randomUUID()}`,
       workdir: ctx.workdir,
+      // Give the codex worker the spawn MCP so it can launch further agents
+      // instead of being one-shot. It runs at this spawn level's depth;
+      // its children spawn at depth+1, bounded by the cap in the server.
+      enableSpawnMcp: true,
+      spawnDepth: ctx.depth + 1,
       processFactory: ctx.codexProcessFactory,
     });
     const out = await rt.send({ text: prompt });
