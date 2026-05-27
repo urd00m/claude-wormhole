@@ -34,6 +34,19 @@ export const configSchema = z.object({
    * everything else falls back to this.
    */
   DEFAULT_RUNTIME: z.enum(["claude", "codex"]).default("claude"),
+  /**
+   * Per-session context-usage footer on Claude replies. "on" (default)
+   * appends a compact "🧠 [▰▰▱▱▱] 38% · 380k/1M" line to each reply,
+   * computed from the session transcript via the arch-common
+   * context_length skill. "off" disables it.
+   */
+  CONTEXT_INDICATOR: z.enum(["on", "off"]).default("on"),
+  /**
+   * Context window size (tokens) used to compute the % full in the
+   * indicator. Default 1M matches claude-opus-4-7[1m]; set to 200000 for a
+   * 200k-tier session.
+   */
+  CONTEXT_WINDOW_TOKENS: z.coerce.number().int().positive().default(1_000_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

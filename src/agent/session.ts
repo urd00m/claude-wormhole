@@ -109,6 +109,15 @@ export class Session {
     this._runtime.resetConversation();
   }
 
+  /**
+   * The session id the context_length skill can read a transcript for, or
+   * null. Claude-only — Codex stores its rollout differently, so the
+   * context-usage footer is skipped for Codex threads.
+   */
+  contextSessionId(): string | null {
+    return this._runtime instanceof ClaudeRuntime ? this._runtime.contextSessionId : null;
+  }
+
   send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     return this._runtime.send(input, hooks);
   }

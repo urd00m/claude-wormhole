@@ -18,6 +18,8 @@ import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
 import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
 import { expandMacros, getMacroStore } from "../agent/macroStore.js";
+import { getContextUsage, formatContextFooter } from "./contextIndicator.js";
+import { env } from "../config.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -224,6 +226,19 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           onTaskEvent: taskEventPoster,
         },
       );
+
+      // Per-session context-usage footer (Claude threads only). Best-effort:
+      // appended after the canonical final text (set via onFinal above) so it
+      // rides the same finalize() flush. Any failure → no footer, never an
+      // error in the reply.
+      if (env.CONTEXT_INDICATOR === "on") {
+        const ctxSessionId = entry.session.contextSessionId();
+        if (ctxSessionId) {
+          const usage = await getContextUsage(ctxSessionId);
+          if (usage) streamer.appendText(`\n\n${formatContextFooter(usage)}`);
+        }
+      }
+
       await streamer.finalize();
     } catch (err) {
       outcome = "error";

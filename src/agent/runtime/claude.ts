@@ -138,6 +138,17 @@ export class ClaudeRuntime implements Runtime {
     this.sessionId = randomUUID();
   }
 
+  /**
+   * The pinned SDK session UUID once at least one turn has run — i.e. once
+   * the Claude CLI has written a transcript at
+   * ~/.claude/projects/*<uuid>.jsonl that the context_length skill can
+   * read. Null before the first turn (no transcript yet) or right after a
+   * workdir/reset rotation (the new UUID hasn't started a conversation).
+   */
+  get contextSessionId(): string | null {
+    return this.hasStarted ? this.sessionId : null;
+  }
+
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     const prompt = buildPrompt(input);
 

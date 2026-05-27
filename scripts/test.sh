@@ -27,6 +27,7 @@ TESTS=(
   src/agent/runtime/codex.test.ts
   src/agent/runtime/codexWireFormat.test.ts
   src/slack/heartbeat.test.ts
+  src/slack/contextIndicator.test.ts
   src/agent/manager.test.ts
   src/slack/stream.test.ts
   src/slack/streamOverflow.test.ts
