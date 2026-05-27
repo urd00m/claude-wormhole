@@ -14,6 +14,7 @@ import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
 import type { TaskEvent } from "../session.js";
 import { CodexRuntime } from "../runtime/codex.js";
 import type { CodexProcessFactory } from "../runtime/codexProcess.js";
+import { getResidentWorkerRegistry } from "../residentWorkerRegistry.js";
 
 /**
  * Context for one level of the spawn-MCP hierarchy. `depth` is THIS MCP's
@@ -34,6 +35,12 @@ export type SpawnCtx = {
   buildCanUseTool: () => CanUseTool;
   /** Lifecycle hook — fired when a worker starts and when it completes. */
   onTaskEvent?: (event: TaskEvent) => void;
+  /**
+   * Owner thread key for resident workers (namespaces the registry so two
+   * Slack threads can each have a "researcher" without collision). Omitted
+   * for nested/recursive spawn levels that don't manage resident workers.
+   */
+  threadKey?: string;
   /**
    * Test seam — overrides the codex subprocess factory used for Codex
    * workers. Production omits this and CodexRuntime uses the real
@@ -202,8 +209,24 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
         .enum(["claude", "codex"])
         .optional()
         .describe("Which runtime to launch the worker under. 'claude' (default) gets the full Claude Code tool surface and can recursively spawn. 'codex' dispatches to the codex CLI subprocess and returns its final text — Codex workers see no MCP tools and can't spawn further workers, so reach for it when you want a second opinion or Codex-specific capability, not when you need recursive orchestration."),
+      name: z
+        .string()
+        .optional()
+        .describe("Name a RESIDENT worker. The first spawn with a given name launches a long-lived Claude process that stays warm; subsequent spawns with the SAME name send the new prompt to that SAME live process, which retains full in-memory context from earlier turns (no re-spawn, no resume). Use this for an assistant you want to keep coming back to. Kill it with worker_kill; it also dies on bot restart. Requires resident: true."),
+      resident: z
+        .boolean()
+        .optional()
+        .describe("Set true (with `name`) to make the worker resident — a process kept alive across invocations, holding its own conversation context in memory. Default false = the normal one-shot worker (runs once, exits). Resident workers are Claude-only for now and ignore the background/runtime flags."),
     },
-    async ({ prompt, description, background, run_in_background, runtime }) => {
+    async ({ prompt, description, background, run_in_background, runtime, name, resident }) => {
+      // --- Resident worker path -------------------------------------------
+      // A named, long-lived process that retains in-memory context across
+      // invocations. Routed entirely through the registry; the one-shot
+      // background/runtime machinery below does not apply.
+      if (resident === true) {
+        return handleResidentSpawn(ctx, { prompt, name });
+      }
+
       const workerRuntime: "claude" | "codex" = runtime ?? "claude";
       const workerDepth = myDepth + 1;
       // Depth cap applies only to the Claude path — Codex workers don't
@@ -306,12 +329,117 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
     },
   );
 
+  // --- Resident-worker management tools --------------------------------
+  // Only meaningful at the top spawn level (where ctx.threadKey is set).
+  // Nested spawn MCPs don't own resident workers, so we omit these tools
+  // for them to keep the sub-agent surface clean.
+  const managementTools = ctx.threadKey
+    ? [buildWorkerListTool(ctx.threadKey), buildWorkerKillTool(ctx.threadKey)]
+    : [];
+
   return createSdkMcpServer({
     name: "spawn",
     version: "0.1.0",
-    tools: [spawnTool],
+    tools: [spawnTool, ...managementTools],
     alwaysLoad: true,
   });
+}
+
+/**
+ * Resident-spawn handler. Creates the named worker on first use (capturing
+ * this thread's Slack MCP + consent gate so it can post back and stays
+ * gated), or routes the prompt to the already-warm worker. Returns the
+ * worker's reply synchronously — the worker stays alive afterward.
+ */
+async function handleResidentSpawn(
+  ctx: SpawnCtx,
+  args: { prompt: string; name?: string },
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  if (!args.name || args.name.trim().length === 0) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "resident spawn requires a non-empty `name` so the worker can be addressed and killed later.",
+        },
+      ],
+      isError: true,
+    };
+  }
+  if (!ctx.threadKey) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "resident workers can only be created at the top spawn level (no threadKey in this context).",
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const registry = getResidentWorkerRegistry();
+  const worker = registry.getOrCreate({
+    name: args.name,
+    ownerThread: ctx.threadKey,
+    workdir: ctx.workdir,
+    canUseTool: ctx.buildCanUseTool(),
+    mcpServers: { slack: ctx.buildSlackMcp() },
+  });
+
+  try {
+    const reply = await worker.send(args.prompt);
+    return { content: [{ type: "text", text: reply }] };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: "text", text: `resident worker '${args.name}' failed: ${msg}` }],
+      isError: true,
+    };
+  }
+}
+
+function buildWorkerListTool(threadKey: string) {
+  return tool(
+    "worker_list",
+    "List the resident sub-agent workers owned by this Slack thread, with their status (idle / running / dead), creation time, and last-run time. Resident workers are created via spawn with resident: true + a name.",
+    {},
+    async () => {
+      const infos = getResidentWorkerRegistry().list(threadKey);
+      if (infos.length === 0) {
+        return { content: [{ type: "text", text: "No resident workers in this thread." }] };
+      }
+      const lines = infos.map((w) => {
+        const bits = [`• \`${w.name}\` — ${w.status}`, `  created: ${w.createdAt}`];
+        if (w.lastRunAt) bits.push(`  last run: ${w.lastRunAt}`);
+        if (w.lastError) bits.push(`  last error: ${w.lastError}`);
+        return bits.join("\n");
+      });
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  );
+}
+
+function buildWorkerKillTool(threadKey: string) {
+  return tool(
+    "worker_kill",
+    "Kill a resident sub-agent worker by name. Terminates its held-open process and frees the name for reuse. Use worker_list to see names.",
+    { name: z.string().describe("Name of the resident worker to kill.") },
+    async ({ name }) => {
+      const killed = getResidentWorkerRegistry().kill(threadKey, name);
+      return {
+        content: [
+          {
+            type: "text",
+            text: killed
+              ? `Killed resident worker \`${name}\`.`
+              : `No live resident worker named \`${name}\` in this thread.`,
+          },
+        ],
+        isError: !killed,
+      };
+    },
+  );
 }
 
 /**

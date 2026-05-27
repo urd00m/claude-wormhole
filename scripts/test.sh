@@ -17,6 +17,8 @@ TESTS=(
   src/agent/spawnMcp.test.ts
   src/agent/spawnBackground.test.ts
   src/agent/spawnCodexWorker.test.ts
+  src/agent/runtime/residentWorker.test.ts
+  src/agent/residentWorkerRegistry.test.ts
   src/agent/sessionIsolation.test.ts
   src/agent/spawnFlow.test.ts
   src/agent/sessionStream.test.ts

@@ -16,6 +16,7 @@ import { isEndSessionPhrase } from "./endSessionMatcher.js";
 import { detectRuntimeSwitch } from "./runtimeMatcher.js";
 import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
+import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -84,16 +85,20 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
   if (isEndSessionPhrase(msg.text)) {
     inFlight.delete(dedupeKey);
     const had = sessions.close(key);
+    // Ending the session also kills any resident sub-agent workers owned by
+    // this thread — they're scoped to it and shouldn't outlive it.
+    const killedWorkers = getResidentWorkerRegistry().killAllForThread(key);
     // Always clear the reaction — it can persist in Slack even when there's
     // no in-memory session (e.g. after a bot restart where the index was
     // already wiped but the Slack reaction removal failed transiently).
     await unmarkActive(client, msg.channel, replyThreadTs);
+    const workerNote = killedWorkers > 0 ? ` (${killedWorkers} resident worker(s) killed)` : "";
     await client.chat.postMessage({
       channel: msg.channel,
       thread_ts: replyThreadTs,
       text: had
-        ? "Session ended. The next message in this thread will start a fresh one."
-        : "No active session in this thread (reaction cleared if present).",
+        ? `Session ended${workerNote}. The next message in this thread will start a fresh one.`
+        : `No active session in this thread (reaction cleared if present)${workerNote}.`,
     });
     return;
   }
@@ -184,6 +189,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         spawn: buildSpawnMcp({
           workdir: entry.session.workdir,
           depth: 0,
+          threadKey: key,
           buildSlackMcp: () => buildSlackMcp(slackCtx),
           buildCanUseTool: () => buildCanUseTool(canUseToolCtx),
           onTaskEvent: taskEventPoster,
