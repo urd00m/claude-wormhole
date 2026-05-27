@@ -17,7 +17,7 @@ import {
   SUBAGENT_DISALLOWED_TOOLS,
   SUBAGENT_TOOLS,
 } from "../subagentDepth.js";
-import type { Runtime, SessionInput, SessionOutput, StreamHooks } from "./types.js";
+import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, StreamHooks } from "./types.js";
 
 /**
  * Shape of the SDK's `query` export, minus the parts we don't use. Carved
@@ -32,6 +32,9 @@ export type QueryFn = (params: {
 export type ClaudeRuntimeOpts = {
   threadKey: string;
   workdir: string;
+  /** Per-session launch overrides (from an alias). Claude applies model +
+   * effort; `args` (raw CLI flags) are NOT applicable to the SDK path. */
+  launch?: AgentLaunchConfig;
   canUseTool?: CanUseTool;
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
   /** Test seam — defaults to the real SDK `query`. */
@@ -107,11 +110,13 @@ export class ClaudeRuntime implements Runtime {
    * scenario this guards against.
    */
   private sessionId: string;
+  private readonly launch?: AgentLaunchConfig;
   private readonly queryFn: QueryFn;
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
     this.workdir = opts.workdir;
+    this.launch = opts.launch;
     this.canUseTool = opts.canUseTool;
     this.mcpServers = opts.mcpServers;
     this.queryFn = opts.queryFn ?? (query as unknown as QueryFn);
@@ -217,7 +222,11 @@ export class ClaudeRuntime implements Runtime {
       prompt,
       options: {
         cwd: this.workdir,
-        model: env.ANTHROPIC_MODEL,
+        model: this.launch?.model ?? env.ANTHROPIC_MODEL,
+        // Alias-supplied reasoning effort (SDK option). `args` from the
+        // alias are intentionally NOT applied — the SDK takes no raw CLI
+        // flags, so a Claude alias is limited to model + effort.
+        ...(this.launch?.effort ? { effort: this.launch.effort } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         // AskUserQuestion ships a picker UI in interactive Claude Code, but

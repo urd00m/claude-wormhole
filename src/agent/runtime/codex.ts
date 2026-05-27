@@ -50,7 +50,13 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { env } from "../../config.js";
-import type { Runtime, SessionInput, SessionOutput, StreamHooks } from "./types.js";
+import type {
+  AgentLaunchConfig,
+  Runtime,
+  SessionInput,
+  SessionOutput,
+  StreamHooks,
+} from "./types.js";
 import {
   spawnCodexProcess,
   type CodexProcess,
@@ -60,6 +66,8 @@ import {
 export type CodexRuntimeOpts = {
   threadKey: string;
   workdir: string;
+  /** Per-session launch overrides (from an alias): model, effort, extra args. */
+  launch?: AgentLaunchConfig;
   /** Test seam — defaults to the real `codex` subprocess factory. */
   processFactory?: CodexProcessFactory;
   /**
@@ -132,6 +140,9 @@ function buildArgs(opts: {
   resumeFrom: string | null;
   workdir: string;
   model: string;
+  effort?: string;
+  /** Extra alias args spliced in before the prompt separator (e.g. -c k=v). */
+  extraArgs?: string[];
   lastMessageFile: string;
   prompt: string;
 }): string[] {
@@ -145,6 +156,11 @@ function buildArgs(opts: {
   if (opts.model.length > 0) {
     sharedFlags.push("-m", opts.model);
   }
+  if (opts.effort && opts.effort.length > 0) {
+    // Reasoning effort is a config override, accepted on both exec + resume.
+    sharedFlags.push("-c", `model_reasoning_effort=${opts.effort}`);
+  }
+  const extra = opts.extraArgs ?? [];
   if (opts.resumeFrom === null) {
     // Fresh session: --cd / --sandbox / --add-dir all live here.
     return [
@@ -156,12 +172,13 @@ function buildArgs(opts: {
       "workspace-write",
       "--add-dir",
       "/",
+      ...extra,
       "--",
       opts.prompt,
     ];
   }
   // Resume: NO --cd / --sandbox / --add-dir; positional UUID before prompt.
-  return ["exec", "resume", ...sharedFlags, opts.resumeFrom, "--", opts.prompt];
+  return ["exec", "resume", ...sharedFlags, ...extra, opts.resumeFrom, "--", opts.prompt];
 }
 
 /**
@@ -257,12 +274,14 @@ export class CodexRuntime implements Runtime {
   readonly threadKey: string;
   workdir: string;
   private sessionId: string | null = null;
+  private readonly launch?: AgentLaunchConfig;
   private readonly processFactory: CodexProcessFactory;
   private readonly lastMessageFileFactory: () => string;
 
   constructor(opts: CodexRuntimeOpts) {
     this.threadKey = opts.threadKey;
     this.workdir = opts.workdir;
+    this.launch = opts.launch;
     this.processFactory = opts.processFactory ?? spawnCodexProcess;
     this.lastMessageFileFactory = opts.lastMessageFileFactory ?? defaultLastMessageFile;
   }
@@ -288,7 +307,9 @@ export class CodexRuntime implements Runtime {
     const args = buildArgs({
       resumeFrom: sessionIdAtStart,
       workdir: this.workdir,
-      model: env.OPENAI_MODEL,
+      model: this.launch?.model ?? env.OPENAI_MODEL,
+      effort: this.launch?.effort,
+      extraArgs: this.launch?.args,
       lastMessageFile,
       prompt,
     });

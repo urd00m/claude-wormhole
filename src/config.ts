@@ -79,3 +79,5 @@ export const CRONS_FILE = path.join(DATA_DIR, "crons.json");
 export const WORKDIRS_FILE = path.join(DATA_DIR, "workdirs.json");
 export const RUNTIMES_FILE = path.join(DATA_DIR, "runtimes.json");
 export const MACROS_FILE = path.join(DATA_DIR, "macros.json");
+export const ALIASES_FILE = path.join(DATA_DIR, "aliases.json");
+export const THREAD_ALIASES_FILE = path.join(DATA_DIR, "thread-aliases.json");

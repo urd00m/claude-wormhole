@@ -4,9 +4,10 @@ import { SESSIONS_DIR, env } from "../config.js";
 import { Session } from "./session.js";
 import { getWorkdirStore } from "./workdirStore.js";
 import { getRuntimeStore, type RuntimeName } from "./runtimeStore.js";
+import { getAliasStore, getActiveAliasStore, launchConfigOf } from "./aliasStore.js";
 import { ClaudeRuntime } from "./runtime/claude.js";
 import { CodexRuntime } from "./runtime/codex.js";
-import type { Runtime } from "./runtime/types.js";
+import type { AgentLaunchConfig, Runtime } from "./runtime/types.js";
 
 export type ThreadKey = string;
 
@@ -63,7 +64,47 @@ class SessionEntry {
  * about to talk to without instantiating one.
  */
 export function resolveRuntimeName(key: ThreadKey): RuntimeName {
-  return getRuntimeStore().get(key) ?? env.DEFAULT_RUNTIME;
+  return resolveThreadLaunch(key).runtime;
+}
+
+/**
+ * Resolve the runtime + launch config a thread should use:
+ *   1. An active alias (set by invoking it in Slack) wins — its `runtime`
+ *      and {model, effort, args} drive the session.
+ *   2. Otherwise the per-thread runtime override, then env.DEFAULT_RUNTIME,
+ *      with no launch config.
+ *
+ * Exposed for tests + so handlers can report the selection without
+ * instantiating a runtime.
+ */
+export function resolveThreadLaunch(key: ThreadKey): { runtime: RuntimeName; launch?: AgentLaunchConfig } {
+  const aliasName = getActiveAliasStore().get(key);
+  return decideLaunch({
+    aliasName,
+    aliasDef: aliasName ? getAliasStore().get(aliasName) : undefined,
+    runtimeOverride: getRuntimeStore().get(key),
+    defaultRuntime: env.DEFAULT_RUNTIME,
+  });
+}
+
+/**
+ * Pure launch-resolution decision (no I/O), exported for tests:
+ *   - A live alias (name present AND its definition still exists) wins,
+ *     contributing both its runtime and launch config.
+ *   - A dangling alias (name set but definition gone — file edited) falls
+ *     through to the runtime override / default with no launch config.
+ *   - No alias → runtime override, then default.
+ */
+export function decideLaunch(opts: {
+  aliasName: string | undefined;
+  aliasDef: import("./aliasStore.js").AliasDef | undefined;
+  runtimeOverride: RuntimeName | undefined;
+  defaultRuntime: RuntimeName;
+}): { runtime: RuntimeName; launch?: AgentLaunchConfig } {
+  if (opts.aliasName && opts.aliasDef) {
+    return { runtime: opts.aliasDef.runtime, launch: launchConfigOf(opts.aliasDef) };
+  }
+  return { runtime: opts.runtimeOverride ?? opts.defaultRuntime };
 }
 
 /**
@@ -72,11 +113,11 @@ export function resolveRuntimeName(key: ThreadKey): RuntimeName {
  * Session having to know how to build them.
  */
 function buildRuntime(key: ThreadKey, workdir: string): Runtime {
-  const name = resolveRuntimeName(key);
-  if (name === "codex") {
-    return new CodexRuntime({ threadKey: key, workdir });
+  const { runtime, launch } = resolveThreadLaunch(key);
+  if (runtime === "codex") {
+    return new CodexRuntime({ threadKey: key, workdir, launch });
   }
-  return new ClaudeRuntime({ threadKey: key, workdir });
+  return new ClaudeRuntime({ threadKey: key, workdir, launch });
 }
 
 export class SessionManager {

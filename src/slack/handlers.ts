@@ -18,6 +18,8 @@ import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
 import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
 import { expandMacros, getMacroStore } from "../agent/macroStore.js";
+import { parseAliasInvocation, getAliasStore, getActiveAliasStore } from "../agent/aliasStore.js";
+import { getWorkdirStore, resolveWorkdir } from "../agent/workdirStore.js";
 import { getContextUsage, formatContextFooter } from "./contextIndicator.js";
 import { env } from "../config.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
@@ -138,10 +140,61 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     return;
   }
 
-  // User-defined macro expansion. Reserved control phrases above are
-  // matched on the RAW text and win; everything else has its macro tokens
-  // expanded here (pure text substitution) before the agent sees it.
-  msg.text = expandMacros(msg.text, getMacroStore().all());
+  // Launch-alias trigger: `<alias> [workdir] [prompt]`. If the first token
+  // is a known alias, point this thread's session at that alias's runtime +
+  // launch config, optionally in the given workdir, then run the (expanded)
+  // prompt. Checked before generic macro expansion because the alias token
+  // is a command, not prose — but the workdir arg + prompt ARE macro-expanded.
+  const macros = getMacroStore().all();
+  const aliasNames = new Set(getAliasStore().names());
+  const aliasInvocation =
+    aliasNames.size > 0 ? parseAliasInvocation(msg.text, aliasNames) : null;
+  if (aliasInvocation) {
+    // Optional workdir arg → macro-expand, validate, persist as the thread
+    // override so the rebuilt session launches there (loads CLAUDE.md/AGENTS.md).
+    let workdirNote = "";
+    if (aliasInvocation.workdirArg) {
+      const expandedWd = expandMacros(aliasInvocation.workdirArg, macros).trim();
+      try {
+        const resolved = resolveWorkdir(expandedWd);
+        getWorkdirStore().set(key, resolved);
+        workdirNote = ` in \`${resolved}\``;
+      } catch (err) {
+        inFlight.delete(dedupeKey);
+        const m = err instanceof Error ? err.message : String(err);
+        await client.chat.postMessage({
+          channel: msg.channel,
+          thread_ts: replyThreadTs,
+          text: `Alias \`${aliasInvocation.alias}\`: invalid working directory — ${m}`,
+        });
+        return;
+      }
+    }
+    // Pin the alias for the thread and tear down any existing session so the
+    // next build picks up the alias's runtime + config + workdir.
+    getActiveAliasStore().set(key, aliasInvocation.alias);
+    sessions.close(key);
+
+    const expandedPrompt = expandMacros(aliasInvocation.prompt, macros);
+    if (expandedPrompt.trim().length === 0) {
+      // Bare launch — no prompt to run this turn.
+      inFlight.delete(dedupeKey);
+      await unmarkActive(client, msg.channel, replyThreadTs);
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: replyThreadTs,
+        text: `Launched \`${aliasInvocation.alias}\`${workdirNote}. Your next message will run under it.`,
+      });
+      return;
+    }
+    // Run the prompt this turn under the freshly-pinned alias.
+    msg.text = expandedPrompt;
+  } else {
+    // User-defined macro expansion. Reserved control phrases above are
+    // matched on the RAW text and win; everything else has its macro tokens
+    // expanded here (pure text substitution) before the agent sees it.
+    msg.text = expandMacros(msg.text, macros);
+  }
 
   let entry: Awaited<ReturnType<typeof sessions.get>>["entry"];
   let created: boolean;

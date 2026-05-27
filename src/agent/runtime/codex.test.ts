@@ -621,12 +621,43 @@ async function main() {
     assert(prompt.includes("please analyze"), "prompt includes user text");
   }
 
+  // --- (12) launch config (alias) → -m model, effort, extra args in argv ---
+  {
+    const captured: CapturedSpawn[] = [];
+    const lastFile = lastMsgPathFor("launch");
+    const rt = new CodexRuntime({
+      threadKey: "t-launch",
+      workdir: TMP_ROOT,
+      launch: { model: "gpt-5", effort: "high", args: ["-c", "sandbox_mode=read-only"] },
+      processFactory: makeFactory(captured, [
+        {
+          lines: [metaLine("launch"), agentMessageLine("ok"), taskCompleteLine("ok")],
+          beforeRun: async () => fs.writeFile(lastFile, "ok"),
+        },
+      ]),
+      lastMessageFileFactory: () => lastFile,
+    });
+    await rt.send({ text: "hi" });
+    const args = captured[0].args;
+    // model
+    assert(args.includes("-m") && args[args.indexOf("-m") + 1] === "gpt-5", "launch model → -m gpt-5");
+    // effort → -c model_reasoning_effort=high
+    assert(
+      args.some((a, i) => a === "-c" && args[i + 1] === "model_reasoning_effort=high"),
+      `effort → -c model_reasoning_effort=high: ${args.join(" ")}`,
+    );
+    // extra args present and BEFORE the -- separator
+    const sep = args.indexOf("--");
+    const sandboxIdx = args.findIndex((a, i) => a === "-c" && args[i + 1] === "sandbox_mode=read-only");
+    assert(sandboxIdx > 0 && sandboxIdx < sep, `extra alias args spliced before --: ${args.join(" ")}`);
+  }
+
   // Cleanup tmp tree.
   await fs.rm(TMP_ROOT, { recursive: true, force: true });
 
   console.log(
     "✅ CodexRuntime verified — port, fresh exec, exec resume pinning, workdir/reset rotation, " +
-      "non-zero exit propagation, dangling rollout recovery, defensive parsing, sentinel final, attachments",
+      "non-zero exit propagation, dangling rollout recovery, defensive parsing, sentinel final, attachments, launch-config",
   );
 }
 

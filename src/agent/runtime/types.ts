@@ -16,6 +16,25 @@ export type SessionInput = {
   attachments?: string[];
 };
 
+/** Reasoning-effort levels accepted by both runtimes (Codex honors the
+ * lower three; Claude additionally supports xhigh/max). Passed through —
+ * an unsupported level is the runtime's problem, not the alias layer's. */
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Per-session launch overrides carried by an alias (see agent/aliasStore.ts).
+ * Runtime-neutral; each runtime applies what it can:
+ *   - model  → Claude SDK `model` / Codex `-m`
+ *   - effort → Claude SDK `effort` / Codex `-c model_reasoning_effort=<level>`
+ *   - args   → Codex: extra `codex exec` argv (full pass-through);
+ *              Claude: NOT applicable (SDK takes no raw CLI flags) — ignored.
+ */
+export type AgentLaunchConfig = {
+  model?: string;
+  effort?: EffortLevel;
+  args?: string[];
+};
+
 export type SessionOutput = {
   finalText: string;
 };

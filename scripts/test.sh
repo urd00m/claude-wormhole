@@ -41,6 +41,7 @@ TESTS=(
   src/agent/workdirStore.test.ts
   src/agent/runtimeStore.test.ts
   src/agent/macroStore.test.ts
+  src/agent/aliasStore.test.ts
   src/agent/managerRuntime.test.ts
   src/slack/runtimeMatcher.test.ts
   src/agent/tools/slackPost.test.ts
