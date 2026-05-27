@@ -47,7 +47,8 @@ export type AgentLaunchConfig = {
  * usage). Displayed alongside the context indicator.
  */
 export type SessionUsage = {
-  /** Sum of per-turn total_cost_usd (USD spent this session). */
+  /** Sum of per-turn total_cost_usd — the CLI's equivalent API-rate cost
+   * (notional on a subscription, where billing is quota-based not per-token). */
   costUsd: number;
   /** Cumulative input tokens (incl. cache read/creation) across turns. */
   inputTokens: number;
@@ -55,6 +56,13 @@ export type SessionUsage = {
   outputTokens: number;
   /** Number of turns (sends) accounted. */
   turns: number;
+  /**
+   * Latest known subscription rate-limit utilization (0–100), from the
+   * SDK's rate_limit_event. Optional — the SDK only emits `utilization`
+   * for claude.ai subscription users, and may omit it at low usage.
+   */
+  fiveHourPct?: number;
+  weeklyPct?: number;
 };
 
 export type SessionOutput = {

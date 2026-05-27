@@ -119,6 +119,8 @@ export class ClaudeRuntime implements Runtime {
     outputTokens: 0,
     turns: 0,
   };
+  /** Latest known rate-limit utilization (0–100), from rate_limit_event. */
+  private rateLimits: { fiveHourPct?: number; weeklyPct?: number } = {};
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -418,6 +420,23 @@ export class ClaudeRuntime implements Runtime {
           }
           break;
         }
+        case "rate_limit_event": {
+          // Subscription rate-limit utilization. Only present for claude.ai
+          // subscription users, and `utilization` is omitted at low usage —
+          // so we keep the latest known value per window and tolerate gaps.
+          const info = (msg as { rate_limit_info?: { rateLimitType?: string; utilization?: number } }).rate_limit_info;
+          if (info && typeof info.utilization === "number") {
+            // Normalize: the field is a fraction (0–1) on some versions, a
+            // percentage on others. Treat <=1 as a fraction.
+            const pct = info.utilization <= 1 ? info.utilization * 100 : info.utilization;
+            if (info.rateLimitType === "five_hour") {
+              this.rateLimits.fiveHourPct = pct;
+            } else if (typeof info.rateLimitType === "string" && info.rateLimitType.startsWith("seven_day")) {
+              this.rateLimits.weeklyPct = pct;
+            }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -446,7 +465,12 @@ export class ClaudeRuntime implements Runtime {
 
   /** Cumulative session usage, or null before any turn has completed. */
   usageSnapshot(): SessionUsage | null {
-    return this.usage.turns > 0 ? { ...this.usage } : null;
+    if (this.usage.turns === 0) return null;
+    return {
+      ...this.usage,
+      fiveHourPct: this.rateLimits.fiveHourPct,
+      weeklyPct: this.rateLimits.weeklyPct,
+    };
   }
 }
 

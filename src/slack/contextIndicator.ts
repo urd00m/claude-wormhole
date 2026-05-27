@@ -83,10 +83,16 @@ function humanTokens(n: number): string {
   return String(n);
 }
 
-/** Render the session-usage segment, e.g. "📊 $0.42 · 1.5M tok". */
+/**
+ * Render the session-usage segment, leading with the subscription quota
+ * utilization (5-hour + weekly) and keeping the equivalent dollar cost:
+ *   "📊 5h 42% · wk 18% · $0.42"
+ * Percentages show "n/a" when the SDK hasn't reported utilization (it only
+ * emits it for subscription users, and may omit it at low usage).
+ */
 export function formatUsageSegment(usage: SessionUsage): string {
-  const total = usage.inputTokens + usage.outputTokens;
-  return `📊 $${usage.costUsd.toFixed(2)} · ${humanTokens(total)} tok`;
+  const pct = (v: number | undefined): string => (typeof v === "number" ? `${Math.round(v)}%` : "n/a");
+  return `📊 5h ${pct(usage.fiveHourPct)} · wk ${pct(usage.weeklyPct)} · $${usage.costUsd.toFixed(2)}`;
 }
 
 /**

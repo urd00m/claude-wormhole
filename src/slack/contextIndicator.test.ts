@@ -155,21 +155,33 @@ async function main() {
 
   // ============ usage tracker ============
   {
-    const usage: SessionUsage = { costUsd: 0.42, inputTokens: 1_400_000, outputTokens: 100_000, turns: 5 };
-
-    // formatUsageSegment: cost + total tokens (in+out), humanized.
+    // With quota %s known: lead with 5h + wk %, keep the $ amount.
+    const usage: SessionUsage = {
+      costUsd: 0.42,
+      inputTokens: 1_400_000,
+      outputTokens: 100_000,
+      turns: 5,
+      fiveHourPct: 42,
+      weeklyPct: 18.4,
+    };
     const seg = formatUsageSegment(usage);
-    assert(seg.includes("$0.42"), `cost: ${seg}`);
-    assert(seg.includes("1.5M tok"), `total tokens (1.4M+100k=1.5M): ${seg}`);
+    assert(seg.includes("5h 42%"), `5h pct: ${seg}`);
+    assert(seg.includes("wk 18%"), `weekly pct rounded: ${seg}`);
+    assert(seg.includes("$0.42"), `dollar kept alongside: ${seg}`);
     assert(seg.includes("📊"), "usage emoji");
+
+    // Percentages unknown (SDK didn't report utilization) → "n/a", $ still shown.
+    const segNa = formatUsageSegment({ costUsd: 0.1, inputTokens: 0, outputTokens: 0, turns: 1 });
+    assert(segNa.includes("5h n/a") && segNa.includes("wk n/a"), `n/a fallback: ${segNa}`);
+    assert(segNa.includes("$0.10"), "dollar shown even when % n/a");
 
     // formatContextFooter appends the usage segment when usage is present.
     const withUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), usage);
-    assert(withUsage.includes("38%") && withUsage.includes("$0.42"), `combined footer: ${withUsage}`);
+    assert(withUsage.includes("38%") && withUsage.includes("5h 42%"), `combined footer: ${withUsage}`);
 
     // ...and omits it when usage is null/undefined.
     const noUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), null);
-    assert(!noUsage.includes("$") && !noUsage.includes("📊"), `no usage segment when null: ${noUsage}`);
+    assert(!noUsage.includes("📊"), `no usage segment when null: ${noUsage}`);
   }
 
   console.log(

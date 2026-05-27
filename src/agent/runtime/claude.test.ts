@@ -516,6 +516,32 @@ async function main() {
     assert(u!.turns === 2, "two turns");
     assert(Math.abs(u!.costUsd - 0.04) < 1e-9, `cost summed: ${u!.costUsd}`);
     assert(u!.outputTokens === 100, "output summed");
+    // No rate-limit events emitted → percentages undefined.
+    assert(u!.fiveHourPct === undefined && u!.weeklyPct === undefined, "no rate-limit % without events");
+  }
+
+  // --- (17c) rate-limit utilization captured from rate_limit_event ---
+  {
+    const rlQuery: QueryFn = () =>
+      (async function* () {
+        // fraction form (0–1) → normalized to %
+        yield {
+          type: "rate_limit_event",
+          rate_limit_info: { rateLimitType: "five_hour", utilization: 0.42 },
+        } as never;
+        // weekly via a seven_day* type, already in percent form
+        yield {
+          type: "rate_limit_event",
+          rate_limit_info: { rateLimitType: "seven_day_opus", utilization: 18 },
+        } as never;
+        yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0.01 } as never;
+      })();
+    const rt = new ClaudeRuntime({ threadKey: "thread_rl", workdir: "/x", queryFn: rlQuery });
+    await rt.send({ text: "1" });
+    const u = rt.usageSnapshot();
+    assert(u !== null, "snapshot present");
+    assert(u!.fiveHourPct === 42, `five_hour 0.42 → 42%: ${u!.fiveHourPct}`);
+    assert(u!.weeklyPct === 18, `seven_day_opus 18 → 18%: ${u!.weeklyPct}`);
   }
 
   // --- (18) no launch config → effort + extraArgs absent, model from env ---
