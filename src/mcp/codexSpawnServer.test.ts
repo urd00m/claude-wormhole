@@ -12,7 +12,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { handleSpawn, type SpawnWorkerRunner } from "./codexSpawnServer.js";
+import {
+  handleSpawn,
+  buildCodexSubArgs,
+  buildClaudeSubArgs,
+  type SpawnWorkerArgs,
+  type SpawnWorkerRunner,
+} from "./codexSpawnServer.js";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`ASSERT: ${msg}`);
@@ -53,6 +59,48 @@ async function main() {
     const emptyRunner: SpawnWorkerRunner = async () => ({ text: "", isError: false });
     r = await handleSpawn(emptyRunner, 0, 10, { prompt: "x" });
     assert(r.content[0].text.includes("no text"), "empty → sentinel");
+
+    // runtime is forwarded to the runner (codex vs claude dispatch)
+    const seen: SpawnWorkerArgs[] = [];
+    const recordRunner: SpawnWorkerRunner = async (a) => {
+      seen.push(a);
+      return { text: "ok", isError: false };
+    };
+    await handleSpawn(recordRunner, 0, 10, { prompt: "p", runtime: "claude" });
+    assert(seen[0].runtime === "claude", "runtime forwarded to runner");
+  }
+
+  // ===== (1b) arg builders =====
+  {
+    // Codex sub-worker: exec + model + effort + recursion MCP flags + prompt last.
+    const ca = buildCodexSubArgs({
+      prompt: "do x",
+      model: "gpt-5",
+      effort: "high",
+      workdir: "/w",
+      lastFile: "/tmp/last.txt",
+      tsx: "/bin/tsx",
+      server: "/srv.ts",
+    });
+    assert(ca[0] === "exec", "codex args start with exec");
+    assert(ca.includes("-m") && ca[ca.indexOf("-m") + 1] === "gpt-5", "codex -m model");
+    assert(ca.some((a, i) => a === "-c" && ca[i + 1] === "model_reasoning_effort=high"), "codex effort");
+    assert(ca.some((a) => a.startsWith("mcp_servers.wormhole_spawn.command=")), "codex recursion MCP flag");
+    const sep = ca.indexOf("--");
+    assert(ca[sep + 1] === "do x", "codex prompt after --");
+    // Without tsx/server → no recursion flags (leaf-ish).
+    const ca2 = buildCodexSubArgs({ prompt: "y", workdir: "/w", lastFile: "/tmp/l" });
+    assert(!ca2.some((a) => a.startsWith("mcp_servers.wormhole_spawn")), "no recursion flag without tsx/server");
+
+    // Claude sub-worker: print mode + json + model + prompt last.
+    const la = buildClaudeSubArgs({ prompt: "review", model: "claude-opus-4-7" });
+    assert(la.includes("-p"), "claude -p");
+    assert(la.includes("--output-format") && la[la.indexOf("--output-format") + 1] === "json", "claude json output");
+    assert(la.includes("--model") && la[la.indexOf("--model") + 1] === "claude-opus-4-7", "claude --model");
+    assert(la[la.length - 1] === "review", "claude prompt last");
+    // No model → no --model flag.
+    const la2 = buildClaudeSubArgs({ prompt: "x" });
+    assert(!la2.includes("--model"), "no --model when model omitted");
   }
 
   // ===== (2) protocol integration: real server subprocess, stub worker =====
@@ -83,7 +131,7 @@ async function main() {
   }
 
   console.log(
-    "✅ codexSpawnServer verified — handleSpawn (dispatch, depth cap, error, sentinel) + live MCP protocol (tools/list + tools/call over stdio)",
+    "✅ codexSpawnServer verified — handleSpawn (dispatch, depth cap, error, sentinel, runtime fwd) + arg builders (codex/claude) + live MCP protocol (tools/list + tools/call over stdio)",
   );
 }
 

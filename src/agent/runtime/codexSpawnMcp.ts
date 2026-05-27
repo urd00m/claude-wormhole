@@ -12,8 +12,21 @@
 // WORMHOLE_SPAWN_* env), bounded by WORMHOLE_SPAWN_MAX_DEPTH.
 
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { ROOT_DIR } from "../../config.js";
 import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
+
+/** Resolve an absolute `claude` path once, so the spawn server can launch
+ * claude leaf workers without depending on PATH inside the codex subprocess.
+ * Falls back to the bare command if resolution fails (PATH may still work). */
+function resolveClaudeBin(): string {
+  try {
+    return execFileSync("bash", ["-lc", "command -v claude"], { encoding: "utf8" }).trim() || "claude";
+  } catch {
+    return "claude";
+  }
+}
+let _claudeBin: string | null = null;
 
 /** MCP server name codex sees; tool is wormhole_spawn__spawn on its side. */
 export const CODEX_SPAWN_MCP_NAME = "wormhole_spawn";
@@ -49,6 +62,9 @@ export function codexSpawnMcpFlags(depth: number, workdir: string): { args: stri
       WORMHOLE_SPAWN_TSX: tsx,
       WORMHOLE_SPAWN_SERVER: server,
       WORMHOLE_SPAWN_WORKDIR: workdir,
+      // Absolute claude path so the spawn server can launch claude leaf
+      // workers (runtime:"claude") regardless of the subprocess PATH.
+      WORMHOLE_SPAWN_CLAUDE: (_claudeBin ??= resolveClaudeBin()),
     },
   };
 }
