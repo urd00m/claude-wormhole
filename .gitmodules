@@ -1,0 +1,3 @@
+[submodule "arch-common"]
+	path = arch-common
+	url = https://github.com/cwfletcher/arch-common.git
