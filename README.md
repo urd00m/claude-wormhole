@@ -4,7 +4,7 @@ A Slack bot that **is** a coding agent. Every Slack thread becomes its own per-t
 
 Think of it as Claude Code or Codex CLI in your DMs.
 
-> For day-to-day usage (how threads map to sessions, what commands need consent, attaching files, asking for diagrams, switching runtimes, etc.) see **[USAGE.md](./USAGE.md)**.
+> Everything you need is in this README — setup, [authentication](#authentication), and the full [feature](#features) list (runtimes, aliases, macros, sub-agents/resident workers, the context+usage footer).
 
 ---
 
@@ -18,9 +18,12 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Consent gate** — destructive commands (`rm`, `git reset --hard`, force-push, `dd`, file truncation, etc.) pause and ask for an Approve/Deny button click before running. Claude threads + sub-agents go through this gate; Codex threads use a coarser sandbox (see USAGE).
 - **File ingest** — drop a PDF, image, or any file into the Slack thread; the bot reads it.
 - **File output** (Claude only) — agent can post images/PDFs/diagrams back into the thread via MCP.
-- **Sub-agents** (Claude only) — the agent can spawn sub-agents (via the `mcp__spawn__spawn` tool) for parallel or context-isolated work.
+- **Sub-agents** — the agent can spawn sub-agents (via the `mcp__spawn__spawn` tool) for parallel or context-isolated work. Claude can also launch **resident workers** that stay warm across calls, and **Codex workers can now spawn too** (codex→codex and codex→claude). See [Features](#features).
+- **Launch aliases** — define named agent configs in `data/aliases.json` (runtime, model, effort, extra CLI args) and start a thread with `custom_claude ~/code/myrepo <prompt>`.
+- **Text macros** — define shorthand in `data/macros.json`; any whole-token match in a message expands before the agent runs.
+- **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18%` showing context-window fullness and subscription quota.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
-- **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
+- **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
 - **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately. The next message in that thread starts fresh.
 
 ---
@@ -40,9 +43,8 @@ cd slack-claude-agent
 npm run login                # OAuth into your Claude Pro/Max subscription, OR
 # …set ANTHROPIC_API_KEY in .env to use a pay-as-you-go API key instead
 
-# 4. (Optional) Authenticate to Codex — only needed if you want Codex-backed threads
+# 4. (Optional) Authenticate to Codex — only needed for Codex-backed threads
 #    Install the CLI: brew install codex   (or your package manager equivalent)
-#    Then pick ONE:
 codex login                  # OAuth into your ChatGPT/Codex subscription, OR
 # …set OPENAI_API_KEY in .env to use an API key
 
@@ -110,6 +112,75 @@ If you'd rather configure by hand, the manifest is the authoritative list — ev
 - **App-Level Token scope:** `connections:write`
 - **Bot scopes:** `app_mentions:read`, `channels:history`, `chat:write`, `files:read`, `files:write`, `groups:history`, `im:history`, `im:read`, `im:write`, `mpim:history`, `reactions:read`, `reactions:write`
 - **Subscribed bot events:** `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`
+
+---
+
+## Authentication
+
+**Claude** — pick one:
+- **Subscription:** `npm run login` — runs the Claude Code OAuth flow (works on a GUI box via browser, or headless via its device-code flow) and stores the credentials itself; the SDK reuses them. Headless boxes: if no browser opens, it prints a URL to approve on another device.
+- **API key:** set `ANTHROPIC_API_KEY` in `.env` for pay-as-you-go billing.
+
+**Codex** (only for Codex-backed threads) — install the CLI (`brew install codex`), then `codex login` (ChatGPT/Codex subscription) or set `OPENAI_API_KEY` in `.env`.
+
+---
+
+## Features
+
+### Per-thread runtime (Claude or Codex)
+
+Each thread runs under one runtime. Switch with a plain phrase — `switch to codex`, `use claude`, `back to claude`. Default is `DEFAULT_RUNTIME` in `.env`; per-thread choice persists in `data/runtimes.json`. Conversation context does **not** carry across a switch.
+
+### Launch aliases
+
+Named agent configs you start a thread with. Define them in `data/aliases.json`:
+
+```json
+{
+  "custom_claude": { "runtime": "claude", "model": "claude-opus-4-7", "effort": "high",
+                     "claudeArgs": { "fallback-model": "claude-sonnet-4-6" } },
+  "custom_codex":  { "runtime": "codex", "model": "gpt-5", "effort": "medium",
+                     "codexArgs": ["-c", "sandbox_mode=workspace-write"] }
+}
+```
+
+Invoke as the **first token** of a message: `<alias> [workdir] [prompt]`. The workdir is optional (a literal path or a macro that resolves to one); the prompt is optional and macro-expanded.
+
+```
+custom_claude ~/code/M5CacheRE review the current diff
+```
+launches the `custom_claude` agent in that directory and runs the prompt. Bare `custom_claude` just pins the alias; your next message runs under it. Fields: `runtime`, `model`, `effort` (`low|medium|high|xhigh|max`), `codexArgs` (Codex argv), `claudeArgs` (Claude SDK `extraArgs`). Active alias persists per thread in `data/thread-aliases.json`.
+
+### Text macros
+
+Pure text expansion. Define in `data/macros.json`:
+
+```json
+{ "swd": "set working dir to /Users/me/code/M5CacheRE and use its CLAUDE.md" }
+```
+
+Every whole-token, case-sensitive occurrence in a message is replaced before the agent runs (`swd to foo` → `set working dir to … to foo`). Hand-edit the file; changes apply without a restart.
+
+### Sub-agents & resident workers
+
+- **One-shot spawn:** the agent calls `mcp__spawn__spawn` to run a worker (sync or `background: true`) that reports back. `runtime: "codex"` dispatches the worker to Codex instead of Claude.
+- **Resident workers (Claude):** `mcp__spawn__spawn` with `name` + `resident: true` launches a long-lived process that stays warm across calls, keeping its context in memory (no resume). Same name → same worker. `worker_list` and `worker_kill` manage them; `end session` kills a thread's workers.
+- **Codex can spawn too:** a Codex worker gets its own `spawn` tool (via a stdio MCP server), so it's no longer one-shot — `codex→codex` recurses (depth-capped) and `codex→claude` delegates to a Claude leaf.
+
+### Context + usage footer (Claude)
+
+Each Claude reply ends with `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $0.42`:
+- **Context** — how full the window is, via the arch-common `context_length` skill reading the session transcript.
+- **Usage** — subscription quota utilization (5-hour + weekly, when the API reports it) plus the equivalent API-rate cost.
+
+Toggle with `CONTEXT_INDICATOR=on|off`; set the window with `CONTEXT_WINDOW_TOKENS`.
+
+### arch-common
+
+`arch-common/` is a vendored folder holding `commands/` (shared
+hardware/architecture-research skill references) and `scripts/` (helper
+tools, including `context_length.py` used by the context indicator). It's
+plain tracked files — no submodule, nothing to init after cloning.
 
 ---
 
@@ -187,7 +258,7 @@ See `TODO.md` for the deferred list. The big ones:
 - **Multi-workspace install** — single-workspace only for now (one set of tokens, no OAuth flow).
 - **Session persistence across restarts** — sessions are in-memory; restart loses the per-thread agent state (Slack messages stay, but the agent loses its context). Codex resumes by rollout UUID on disk, so Codex threads can survive bot restarts if the UUID is still pinned in `data/runtimes.json` — Claude threads lose context on restart.
 - **Stronger sandboxing** — the agent runs Bash on your laptop, scoped to `sessions/<threadKey>/`. The consent gate catches the common destructive patterns but is not a sandbox. Docker-per-session is sketched in TODO.
-- **Codex parity with Claude** — Codex threads don't yet see the wormhole's MCP tools (no `slack_post_file`, `set_workdir`, `cron_add`, sub-agents), and the destructive-command consent gate is coarser (sandbox-level, not per-call). See the **Picking a runtime** section of USAGE for the full delta.
+- **Codex parity with Claude** — Codex *workers* can now spawn (a stdio `spawn` MCP), but a Codex *thread* still doesn't get the other wormhole MCP tools (`slack_post_file`, `set_workdir`, `cron_add`), and its destructive-command consent gate is coarser (`--sandbox workspace-write`, not per-call). The context/usage footer is Claude-only.
 
 ---
 
@@ -201,5 +272,5 @@ See `TODO.md` for the deferred list. The big ones:
 
 ## See also
 
-- **[USAGE.md](./USAGE.md)** — how to actually use it once it's running.
 - **[TODO.md](./TODO.md)** — deferred features and known limitations.
+- **[USAGE.md](./USAGE.md)** — older walkthrough (the README above is the current, authoritative reference).
