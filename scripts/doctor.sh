@@ -37,15 +37,17 @@ check_var SLACK_APP_TOKEN "xapp-"
 check_var SLACK_BOT_TOKEN "xoxb-"
 check_var SLACK_SIGNING_SECRET ""
 
-# Claude auth: either ANTHROPIC_API_KEY or an OAuth credentials file is required.
+# Claude auth: ANTHROPIC_API_KEY or a file-based OAuth credential. We do NOT
+# use the macOS Keychain (per-query reads are too slow); `npm run login`
+# produces ~/.claude/.credentials.json.
 CREDS_PRIMARY="$HOME/.claude/.credentials.json"
 CREDS_ALT="$HOME/.claude/credentials.json"
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   ok "Claude auth: ANTHROPIC_API_KEY set"
 elif [ -f "$CREDS_PRIMARY" ] || [ -f "$CREDS_ALT" ]; then
-  ok "Claude auth: subscription OAuth credentials present (~/.claude/)"
+  ok "Claude auth: subscription OAuth credentials file present (~/.claude/)"
 else
-  err "Claude auth: neither ANTHROPIC_API_KEY nor ~/.claude/.credentials.json found — run 'npm run login' or set the env var"
+  err "Claude auth: no ANTHROPIC_API_KEY and no ~/.claude/.credentials.json — run 'npm run login' (creates the file) or set the env var"
   FAIL=1
 fi
 
