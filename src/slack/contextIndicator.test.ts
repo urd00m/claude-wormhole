@@ -3,7 +3,8 @@
 // formatContextFooter rendering. The skill (context_length.py) itself is
 // arch-common's; here we only test our glue + presentation.
 
-import { getContextUsage, formatContextFooter, type ContextUsage } from "./contextIndicator.js";
+import { getContextUsage, formatContextFooter, formatUsageSegment, type ContextUsage } from "./contextIndicator.js";
+import type { SessionUsage } from "../agent/runtime/types.js";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`ASSERT: ${msg}`);
@@ -152,8 +153,27 @@ async function main() {
     assert(f.includes("100%"), `clamped display: ${f}`);
   }
 
+  // ============ usage tracker ============
+  {
+    const usage: SessionUsage = { costUsd: 0.42, inputTokens: 1_400_000, outputTokens: 100_000, turns: 5 };
+
+    // formatUsageSegment: cost + total tokens (in+out), humanized.
+    const seg = formatUsageSegment(usage);
+    assert(seg.includes("$0.42"), `cost: ${seg}`);
+    assert(seg.includes("1.5M tok"), `total tokens (1.4M+100k=1.5M): ${seg}`);
+    assert(seg.includes("📊"), "usage emoji");
+
+    // formatContextFooter appends the usage segment when usage is present.
+    const withUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), usage);
+    assert(withUsage.includes("38%") && withUsage.includes("$0.42"), `combined footer: ${withUsage}`);
+
+    // ...and omits it when usage is null/undefined.
+    const noUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), null);
+    assert(!noUsage.includes("$") && !noUsage.includes("📊"), `no usage segment when null: ${noUsage}`);
+  }
+
   console.log(
-    "✅ contextIndicator verified — getContextUsage (parse/compute/compaction/error/garbage/window-guard) + formatContextFooter (emoji buckets, bar fill, k/M, compaction, clamp)",
+    "✅ contextIndicator verified — getContextUsage (parse/compute/compaction/error/garbage/window-guard) + formatContextFooter (emoji buckets, bar fill, k/M, compaction, clamp) + usage tracker (segment, combined footer)",
   );
 }
 

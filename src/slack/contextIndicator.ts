@@ -11,6 +11,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { ROOT_DIR, env } from "../config.js";
+import type { SessionUsage } from "../agent/runtime/types.js";
 
 export type ContextUsage = {
   measured: number;
@@ -82,11 +83,19 @@ function humanTokens(n: number): string {
   return String(n);
 }
 
+/** Render the session-usage segment, e.g. "📊 $0.42 · 1.5M tok". */
+export function formatUsageSegment(usage: SessionUsage): string {
+  const total = usage.inputTokens + usage.outputTokens;
+  return `📊 $${usage.costUsd.toFixed(2)} · ${humanTokens(total)} tok`;
+}
+
 /**
- * Render the one-line footer, e.g.:  _🧠 `[▰▰▱▱▱]` 38% · 380k/1M_
- * Emoji escalates with fullness: 🧠 (<60%) → ⚠️ (60–84%) → 🔴 (≥85%).
+ * Render the one-line footer, e.g.:
+ *   _🧠 `[▰▰▱▱▱]` 38% · 380k/1M · 📊 $0.42 · 1.5M tok_
+ * Context emoji escalates with fullness: 🧠 (<60%) → ⚠️ (60–84%) → 🔴 (≥85%).
+ * The usage segment is appended when session usage is available.
  */
-export function formatContextFooter(u: ContextUsage): string {
+export function formatContextFooter(u: ContextUsage, usage?: SessionUsage | null): string {
   const pct = Math.max(0, Math.min(100, u.usedPct));
   const slots = 5;
   const filled = Math.max(0, Math.min(slots, Math.round((slots * pct) / 100)));
@@ -94,5 +103,6 @@ export function formatContextFooter(u: ContextUsage): string {
   const emoji = pct >= 85 ? "🔴" : pct >= 60 ? "⚠️" : "🧠";
   let line = `${emoji} \`[${bar}]\` ${pct.toFixed(0)}% · ${humanTokens(u.measured)}/${humanTokens(u.window)}`;
   if (u.compaction) line += " · compacted";
+  if (usage) line += ` · ${formatUsageSegment(usage)}`;
   return `_${line}_`;
 }

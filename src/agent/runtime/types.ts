@@ -41,6 +41,22 @@ export type AgentLaunchConfig = {
   claudeArgs?: Record<string, string | null>;
 };
 
+/**
+ * Cumulative usage for a session, accumulated across turns. Sourced from the
+ * runtime's per-turn result (Claude SDK result message: total_cost_usd +
+ * usage). Displayed alongside the context indicator.
+ */
+export type SessionUsage = {
+  /** Sum of per-turn total_cost_usd (USD spent this session). */
+  costUsd: number;
+  /** Cumulative input tokens (incl. cache read/creation) across turns. */
+  inputTokens: number;
+  /** Cumulative output tokens across turns. */
+  outputTokens: number;
+  /** Number of turns (sends) accounted. */
+  turns: number;
+};
+
 export type SessionOutput = {
   finalText: string;
 };

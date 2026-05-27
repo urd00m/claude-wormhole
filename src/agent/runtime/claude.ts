@@ -17,7 +17,7 @@ import {
   SUBAGENT_DISALLOWED_TOOLS,
   SUBAGENT_TOOLS,
 } from "../subagentDepth.js";
-import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, StreamHooks } from "./types.js";
+import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, SessionUsage, StreamHooks } from "./types.js";
 
 /**
  * Shape of the SDK's `query` export, minus the parts we don't use. Carved
@@ -112,6 +112,13 @@ export class ClaudeRuntime implements Runtime {
   private sessionId: string;
   private readonly launch?: AgentLaunchConfig;
   private readonly queryFn: QueryFn;
+  /** Cumulative session usage, accumulated from each turn's result message. */
+  private usage: { costUsd: number; inputTokens: number; outputTokens: number; turns: number } = {
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    turns: 0,
+  };
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -250,6 +257,12 @@ export class ClaudeRuntime implements Runtime {
 
     let finalText = "";
     const seenToolStarts = new Set<string>();
+    // Per-turn usage, captured from the terminal result message and folded
+    // into the cumulative session totals after the stream drains.
+    let turnCostUsd = 0;
+    let turnInputTokens = 0;
+    let turnOutputTokens = 0;
+    let sawResult = false;
 
     for await (const msg of q as AsyncIterable<SDKMessage>) {
       // Sub-agent messages carry a non-null parent_tool_use_id. Skip
@@ -320,10 +333,32 @@ export class ClaudeRuntime implements Runtime {
           break;
         }
         case "result": {
-          const r = msg as { subtype?: string; result?: string };
+          const r = msg as {
+            subtype?: string;
+            result?: string;
+            total_cost_usd?: number;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation_input_tokens?: number;
+            };
+          };
           if (r.subtype === "success" && typeof r.result === "string") {
             finalText = r.result;
           }
+          // Capture this turn's usage/cost (one terminal result per send).
+          // total_cost_usd is this query's cost, so summing across the
+          // session's sends gives cumulative session spend.
+          if (typeof r.total_cost_usd === "number") turnCostUsd = r.total_cost_usd;
+          if (r.usage) {
+            turnInputTokens =
+              (r.usage.input_tokens ?? 0) +
+              (r.usage.cache_read_input_tokens ?? 0) +
+              (r.usage.cache_creation_input_tokens ?? 0);
+            turnOutputTokens = r.usage.output_tokens ?? 0;
+          }
+          sawResult = true;
           break;
         }
         case "system": {
@@ -397,9 +432,21 @@ export class ClaudeRuntime implements Runtime {
     if (this.sessionId === sessionIdAtStart) {
       this.hasStarted = true;
     }
+    // Fold this turn's usage into the cumulative session totals (once).
+    if (sawResult) {
+      this.usage.costUsd += turnCostUsd;
+      this.usage.inputTokens += turnInputTokens;
+      this.usage.outputTokens += turnOutputTokens;
+      this.usage.turns += 1;
+    }
     const out = finalText || "_(no response)_";
     hooks.onFinal?.(out);
     return { finalText: out };
+  }
+
+  /** Cumulative session usage, or null before any turn has completed. */
+  usageSnapshot(): SessionUsage | null {
+    return this.usage.turns > 0 ? { ...this.usage } : null;
   }
 }
 

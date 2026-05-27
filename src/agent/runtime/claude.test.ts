@@ -490,6 +490,34 @@ async function main() {
     assert(extraArgs?.verbose === null, "claudeArgs boolean flag → extraArgs null");
   }
 
+  // --- (17b) usage accumulation: cost + tokens summed across sends ---
+  {
+    // A query that yields a result carrying total_cost_usd + usage.
+    const usageQuery: QueryFn = () =>
+      (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+          total_cost_usd: 0.02,
+          usage: { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 },
+        } as never;
+      })();
+    const rt = new ClaudeRuntime({ threadKey: "thread_usage", workdir: "/x", queryFn: usageQuery });
+    assert(rt.usageSnapshot() === null, "no usage before any turn");
+    await rt.send({ text: "1" });
+    let u = rt.usageSnapshot();
+    assert(u !== null && u.turns === 1, "one turn accounted");
+    assert(Math.abs(u!.costUsd - 0.02) < 1e-9, `cost: ${u!.costUsd}`);
+    assert(u!.inputTokens === 1000, `input incl cache: ${u!.inputTokens}`); // 100 + 900
+    assert(u!.outputTokens === 50, "output tokens");
+    await rt.send({ text: "2" });
+    u = rt.usageSnapshot();
+    assert(u!.turns === 2, "two turns");
+    assert(Math.abs(u!.costUsd - 0.04) < 1e-9, `cost summed: ${u!.costUsd}`);
+    assert(u!.outputTokens === 100, "output summed");
+  }
+
   // --- (18) no launch config → effort + extraArgs absent, model from env ---
   {
     const captured: Record<string, unknown>[] = [];

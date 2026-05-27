@@ -118,6 +118,11 @@ export class Session {
     return this._runtime instanceof ClaudeRuntime ? this._runtime.contextSessionId : null;
   }
 
+  /** Cumulative session usage (Claude only), or null. Displayed with the context footer. */
+  usageSnapshot(): import("./runtime/types.js").SessionUsage | null {
+    return this._runtime instanceof ClaudeRuntime ? this._runtime.usageSnapshot() : null;
+  }
+
   send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     return this._runtime.send(input, hooks);
   }

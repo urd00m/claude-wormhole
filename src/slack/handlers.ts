@@ -288,7 +288,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         const ctxSessionId = entry.session.contextSessionId();
         if (ctxSessionId) {
           const usage = await getContextUsage(ctxSessionId);
-          if (usage) streamer.appendText(`\n\n${formatContextFooter(usage)}`);
+          if (usage) streamer.appendText(`\n\n${formatContextFooter(usage, entry.session.usageSnapshot())}`);
         }
       }
 
