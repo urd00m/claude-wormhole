@@ -65,3 +65,4 @@ export const DATA_DIR = path.join(ROOT_DIR, "data");
 export const CRONS_FILE = path.join(DATA_DIR, "crons.json");
 export const WORKDIRS_FILE = path.join(DATA_DIR, "workdirs.json");
 export const RUNTIMES_FILE = path.join(DATA_DIR, "runtimes.json");
+export const MACROS_FILE = path.join(DATA_DIR, "macros.json");

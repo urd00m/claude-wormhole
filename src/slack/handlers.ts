@@ -17,6 +17,7 @@ import { detectRuntimeSwitch } from "./runtimeMatcher.js";
 import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
 import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
+import { expandMacros, getMacroStore } from "../agent/macroStore.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -134,6 +135,11 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     });
     return;
   }
+
+  // User-defined macro expansion. Reserved control phrases above are
+  // matched on the RAW text and win; everything else has its macro tokens
+  // expanded here (pure text substitution) before the agent sees it.
+  msg.text = expandMacros(msg.text, getMacroStore().all());
 
   let entry: Awaited<ReturnType<typeof sessions.get>>["entry"];
   let created: boolean;
