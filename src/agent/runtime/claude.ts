@@ -122,14 +122,24 @@ export class ClaudeRuntime implements Runtime {
   /** Latest known rate-limit utilization (0–100), from rate_limit_event. */
   private rateLimits: { fiveHourPct?: number; weeklyPct?: number } = {};
   /**
-   * Latest turn's prompt size (input + cache_read + cache_creation) = the
-   * context the model saw this turn, and the peak across the session. This
-   * is the SAME number the context_length skill extracts from the
-   * transcript, but read straight from the SDK result message — so it's
-   * available every turn with no transcript-flush race.
+   * Latest turn's prompt size = the context the model saw this turn, and the
+   * peak across the session. Source-of-truth order, best to worst:
+   *   1. `Query.getContextUsage()` — the SDK's official context method,
+   *      same data behind the CLI's interactive /context display.
+   *   2. `result.usage.iterations[last]` — per Anthropic SDK docs,
+   *      "calculate the true context window size from the last iteration."
+   *   3. Top-level `result.usage` sums — fallback only when no iterations[]
+   *      breakdown is present (single-iteration turns / older SDK). These
+   *      fields are SUMMED across iterations so they overshoot multi-iter
+   *      turns; we use them only as a last resort.
    */
   private contextTokens = 0;
   private peakContextTokens = 0;
+  /**
+   * Model context window in tokens. Filled (in order) from
+   * `Query.getContextUsage().maxTokens` or `result.modelUsage[].contextWindow`.
+   */
+  private contextWindowTokens: number | undefined = undefined;
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -344,6 +354,13 @@ export class ClaudeRuntime implements Runtime {
           break;
         }
         case "result": {
+          type IterationUsage = {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
+            type?: string;
+          };
           const r = msg as {
             subtype?: string;
             result?: string;
@@ -353,21 +370,71 @@ export class ClaudeRuntime implements Runtime {
               output_tokens?: number;
               cache_read_input_tokens?: number;
               cache_creation_input_tokens?: number;
+              iterations?: IterationUsage[] | null;
             };
+            modelUsage?: Record<string, { contextWindow?: number }>;
           };
           if (r.subtype === "success" && typeof r.result === "string") {
             finalText = r.result;
           }
-          // Capture this turn's usage/cost (one terminal result per send).
-          // total_cost_usd is this query's cost, so summing across the
-          // session's sends gives cumulative session spend.
+          // total_cost_usd is this query's cost (SDK-computed from
+          // per-model API rates); summing across sends gives cumulative
+          // session spend. On a subscription account this is NOTIONAL —
+          // it's not money you actually pay, it's the equivalent API price.
           if (typeof r.total_cost_usd === "number") turnCostUsd = r.total_cost_usd;
           if (r.usage) {
-            turnInputTokens =
-              (r.usage.input_tokens ?? 0) +
-              (r.usage.cache_read_input_tokens ?? 0) +
-              (r.usage.cache_creation_input_tokens ?? 0);
             turnOutputTokens = r.usage.output_tokens ?? 0;
+            // Prefer the LAST iteration's input — per Anthropic SDK:
+            // "Calculate the true context window size from the last iteration."
+            // The top-level fields are SUMMED across iterations (tool-use
+            // loops), so they overshoot context on multi-iteration turns.
+            const iters = Array.isArray(r.usage.iterations) ? r.usage.iterations : null;
+            const last = iters && iters.length > 0 ? iters[iters.length - 1] : null;
+            if (last) {
+              turnInputTokens =
+                (last.input_tokens ?? 0) +
+                (last.cache_read_input_tokens ?? 0) +
+                (last.cache_creation_input_tokens ?? 0);
+            } else {
+              // Fallback path (single-iteration turn, or older SDK without
+              // iterations[]): the top-level sum equals the only iteration.
+              turnInputTokens =
+                (r.usage.input_tokens ?? 0) +
+                (r.usage.cache_read_input_tokens ?? 0) +
+                (r.usage.cache_creation_input_tokens ?? 0);
+            }
+          }
+          // Model's real context window — pick the max across reported models
+          // (one entry per model used in the turn; main model dominates).
+          if (r.modelUsage) {
+            for (const mu of Object.values(r.modelUsage)) {
+              if (mu && typeof mu.contextWindow === "number" && mu.contextWindow > 0) {
+                this.contextWindowTokens = Math.max(this.contextWindowTokens ?? 0, mu.contextWindow);
+              }
+            }
+          }
+          // Authoritative context-usage breakdown, via the SDK's Query
+          // method (same call that powers the interactive CLI's /context).
+          // It returns totalTokens + maxTokens (real window) directly. We
+          // call it AT the result message, before the iterator closes —
+          // overrides the iteration-derived fallback above when present.
+          // Best-effort: a failure (older SDK / IPC issue) leaves the
+          // fallback in place rather than break the turn.
+          const qWithGet = q as {
+            getContextUsage?: () => Promise<{ totalTokens?: number; maxTokens?: number; percentage?: number }>;
+          };
+          if (typeof qWithGet.getContextUsage === "function") {
+            try {
+              const ctx = await qWithGet.getContextUsage();
+              if (ctx && typeof ctx.totalTokens === "number" && ctx.totalTokens > 0) {
+                turnInputTokens = ctx.totalTokens;
+              }
+              if (ctx && typeof ctx.maxTokens === "number" && ctx.maxTokens > 0) {
+                this.contextWindowTokens = ctx.maxTokens;
+              }
+            } catch {
+              // fall through to the iteration-derived value we already set
+            }
           }
           sawResult = true;
           break;
@@ -484,6 +551,7 @@ export class ClaudeRuntime implements Runtime {
       weeklyPct: this.rateLimits.weeklyPct,
       contextTokens: this.contextTokens,
       peakContextTokens: this.peakContextTokens,
+      contextWindowTokens: this.contextWindowTokens,
     };
   }
 }

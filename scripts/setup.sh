@@ -19,6 +19,13 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
 fi
 ok "Node $(node -v)"
 
+# Optional system tools used by the subscription-quota footer
+# (scripts/fetch-usage.sh). curl ships with macOS; jq usually doesn't. The
+# footer cleanly falls back to SDK-only data without these, so we just hint.
+if ! command -v jq >/dev/null 2>&1; then
+  warn "jq not found — optional; powers the 5h/weekly % readout in the footer. Install: brew install jq"
+fi
+
 step "Installing dependencies"
 npm install
 ok "Dependencies installed"

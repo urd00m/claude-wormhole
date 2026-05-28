@@ -22,6 +22,7 @@ import { expandMacros, getMacroStore } from "../agent/macroStore.js";
 import { parseAliasInvocation, getAliasStore, getActiveAliasStore } from "../agent/aliasStore.js";
 import { getWorkdirStore, resolveWorkdir } from "../agent/workdirStore.js";
 import { formatContextFooter } from "./contextIndicator.js";
+import { getUsageStore } from "../usageStore.js";
 import { env } from "../config.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
@@ -288,10 +289,26 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       // the in-process usage snapshot (no transcript read), so it renders on
       // every turn. Appended after the canonical final text (onFinal above)
       // so it rides the same finalize() flush.
+      //
+      // For 5h/weekly %, the SDK's rate_limit_event is unreliable (server
+      // omits utilization at low usage). We overlay the usage-cache snapshot
+      // from scripts/fetch-usage.sh when present — it polls the same
+      // /api/oauth/usage the CLI uses, so the numbers always populate once
+      // the script has run. maybeRefresh() also kicks off a background
+      // refresh when the cache is stale; we never block on it.
       if (env.CONTEXT_INDICATOR === "on") {
         const usage = entry.session.usageSnapshot();
         if (usage) {
-          const footer = formatContextFooter(usage, env.CONTEXT_WINDOW_TOKENS);
+          const cache = getUsageStore().maybeRefresh();
+          const overlaid =
+            cache && cache.status === "ok"
+              ? {
+                  ...usage,
+                  fiveHourPct: cache.fiveHourPct ?? usage.fiveHourPct,
+                  weeklyPct: cache.weeklyPct ?? usage.weeklyPct,
+                }
+              : usage;
+          const footer = formatContextFooter(overlaid, env.CONTEXT_WINDOW_TOKENS);
           if (footer) streamer.appendText(`\n\n${footer}`);
         }
       }

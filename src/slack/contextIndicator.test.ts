@@ -29,10 +29,22 @@ async function main() {
     const seg = formatUsageSegment(mk({ costUsd: 0.42, fiveHourPct: 42, weeklyPct: 18.4 }));
     assert(seg.includes("5h 42%"), `5h pct: ${seg}`);
     assert(seg.includes("wk 18%"), `weekly rounded: ${seg}`);
-    assert(seg.includes("$0.42"), `cost: ${seg}`);
+    // `$~` prefix marks the SDK cost as a notional API-equivalent price
+    // (subscription users don't pay per-token under their quota).
+    assert(seg.includes("$~0.42"), `cost: ${seg}`);
     const na = formatUsageSegment(mk({ costUsd: 0.1 }));
     assert(na.includes("5h n/a") && na.includes("wk n/a"), `n/a fallback: ${na}`);
-    assert(na.includes("$0.10"), "cost shown when % n/a");
+    assert(na.includes("$~0.10"), "cost shown when % n/a");
+  }
+
+  // --- (0b) SDK-reported window beats the fallback ---
+  {
+    const sdk = formatContextFooter(
+      mk({ contextTokens: 100_000, contextWindowTokens: 200_000 }),
+      1_000_000,
+    );
+    assert(sdk!.includes("100k/200k"), `SDK window wins: ${sdk}`);
+    assert(sdk!.includes("50%"), `pct against SDK window: ${sdk}`);
   }
 
   // ============ formatContextFooter ============

@@ -518,6 +518,119 @@ async function main() {
     assert(u!.outputTokens === 100, "output summed");
     // No rate-limit events emitted → percentages undefined.
     assert(u!.fiveHourPct === undefined && u!.weeklyPct === undefined, "no rate-limit % without events");
+    // No iterations[] in this fixture → fall back to top-level sum for
+    // contextTokens too (= the single-iteration case).
+    assert(u!.contextTokens === 1000, `single-iter contextTokens: ${u!.contextTokens}`);
+    // No modelUsage in this fixture → window undefined (footer falls back to env).
+    assert(u!.contextWindowTokens === undefined, "no modelUsage → window undefined");
+  }
+
+  // --- (17b2) context comes from the LAST iteration, not the top-level sum ---
+  // SDK docs: "Calculate the true context window size from the last iteration."
+  // When a turn has multiple iterations (server-side tool-use loop), the
+  // top-level usage fields are SUMMED — using them for context overshoots.
+  {
+    const multiIterQuery: QueryFn = () =>
+      (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+          total_cost_usd: 0.05,
+          usage: {
+            // Top-level = sum across all 3 iterations.
+            input_tokens: 30, // 10 + 10 + 10
+            cache_read_input_tokens: 600, // 100 + 200 + 300
+            cache_creation_input_tokens: 60, // 20 + 20 + 20
+            output_tokens: 90,
+            iterations: [
+              { type: "message", input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, output_tokens: 30 },
+              { type: "message", input_tokens: 10, cache_read_input_tokens: 200, cache_creation_input_tokens: 20, output_tokens: 30 },
+              { type: "message", input_tokens: 10, cache_read_input_tokens: 300, cache_creation_input_tokens: 20, output_tokens: 30 },
+            ],
+          },
+          modelUsage: { "claude-opus-4-7": { contextWindow: 1_000_000 } },
+        } as never;
+      })();
+    const rt = new ClaudeRuntime({ threadKey: "thread_iter", workdir: "/x", queryFn: multiIterQuery });
+    await rt.send({ text: "1" });
+    const u = rt.usageSnapshot();
+    // Last iteration: 10 + 300 + 20 = 330. Top-level sum would be 690 — wrong.
+    assert(u!.contextTokens === 330, `last-iter context (not sum): ${u!.contextTokens}`);
+    assert(u!.peakContextTokens === 330, `peak == last on first turn: ${u!.peakContextTokens}`);
+    assert(u!.contextWindowTokens === 1_000_000, `window from modelUsage: ${u!.contextWindowTokens}`);
+  }
+
+  // --- (17b3) Query.getContextUsage() overrides iteration data when present ---
+  // This is the SDK's official path (same call powering the CLI's /context).
+  // We mock it by attaching getContextUsage to the AsyncGenerator we yield.
+  {
+    const ctxQuery: QueryFn = () => {
+      const gen = (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+          total_cost_usd: 0.01,
+          // Iteration-based fallback would give 30 + 600 + 60 = 690; the
+          // SDK method must override with 500_000 / 1_000_000.
+          usage: {
+            input_tokens: 30,
+            cache_read_input_tokens: 600,
+            cache_creation_input_tokens: 60,
+            output_tokens: 90,
+            iterations: [
+              { type: "message", input_tokens: 30, cache_read_input_tokens: 600, cache_creation_input_tokens: 60, output_tokens: 90 },
+            ],
+          },
+        } as never;
+      })();
+      // Attach the Query method directly onto the iterator (the runtime
+      // calls (q as Query).getContextUsage()).
+      (gen as unknown as { getContextUsage: () => Promise<unknown> }).getContextUsage = async () => ({
+        totalTokens: 500_000,
+        maxTokens: 1_000_000,
+        percentage: 50,
+      });
+      return gen;
+    };
+    const rt = new ClaudeRuntime({ threadKey: "thread_sdkctx", workdir: "/x", queryFn: ctxQuery });
+    await rt.send({ text: "1" });
+    const u = rt.usageSnapshot();
+    assert(u!.contextTokens === 500_000, `SDK getContextUsage wins over iterations: ${u!.contextTokens}`);
+    assert(u!.contextWindowTokens === 1_000_000, `SDK maxTokens wins: ${u!.contextWindowTokens}`);
+  }
+
+  // --- (17b4) getContextUsage failure → falls back to iteration data ---
+  {
+    const failingCtx: QueryFn = () => {
+      const gen = (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+          total_cost_usd: 0,
+          usage: {
+            input_tokens: 10,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 0,
+            output_tokens: 5,
+            iterations: [
+              { type: "message", input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 5 },
+            ],
+          },
+        } as never;
+      })();
+      (gen as unknown as { getContextUsage: () => Promise<unknown> }).getContextUsage = async () => {
+        throw new Error("transport closed");
+      };
+      return gen;
+    };
+    const rt = new ClaudeRuntime({ threadKey: "thread_ctxfail", workdir: "/x", queryFn: failingCtx });
+    await rt.send({ text: "1" });
+    const u = rt.usageSnapshot();
+    // 10 + 100 + 0 = 110 from the last iteration.
+    assert(u!.contextTokens === 110, `fallback to iteration on getContextUsage error: ${u!.contextTokens}`);
   }
 
   // --- (17c) rate-limit utilization captured from rate_limit_event ---

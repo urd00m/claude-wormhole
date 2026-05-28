@@ -21,7 +21,7 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Sub-agents** — the agent can spawn sub-agents (via the `mcp__spawn__spawn` tool) for parallel or context-isolated work. Claude can also launch **resident workers** that stay warm across calls, and **Codex workers can now spawn too** (codex→codex and codex→claude). See [Features](#features).
 - **Launch aliases** — define named agent configs in `data/aliases.json` (runtime, model, effort, extra CLI args) and start a thread with `custom_claude ~/code/myrepo <prompt>`.
 - **Text macros** — define shorthand in `data/macros.json`; any whole-token match in a message expands before the agent runs.
-- **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18%` showing context-window fullness and subscription quota.
+- **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42` showing context-window fullness (from the SDK's `getContextUsage`), subscription quota (from `/api/oauth/usage` via `scripts/fetch-usage.sh` — needs `jq`), and notional API-equivalent cost.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
 - **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately. The next message in that thread starts fresh.
@@ -169,11 +169,17 @@ Every whole-token, case-sensitive occurrence in a message is replaced before the
 
 ### Context + usage footer (Claude)
 
-Each Claude reply ends with `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $0.42`:
-- **Context** — how full the window is, via the arch-common `context_length` skill reading the session transcript.
-- **Usage** — subscription quota utilization (5-hour + weekly, when the API reports it) plus the equivalent API-rate cost.
+Each Claude reply ends with `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42`:
+- **Context** — `totalTokens / maxTokens` reported by `Query.getContextUsage()` (the same SDK surface that powers the interactive CLI's `/context`), falling back to `result.usage.iterations[last]` when unavailable. Window is the model's real `maxTokens`; `CONTEXT_WINDOW_TOKENS` is just the fallback.
+- **5h / weekly %** — subscription quota utilization. Two sources, in order:
+  1. `scripts/fetch-usage.sh` (if `jq` is installed) calls the same `/api/oauth/usage` endpoint the CLI uses for `/usage-credits`; the wormhole reads the cached JSON (`data/usage.json`) with lazy refresh every 5 min.
+  2. The SDK's `rate_limit_event` (server only emits when utilization crosses a threshold — often blank otherwise).
+  - Falls back to `n/a` when both are absent.
+- **$~X.XX** — the SDK's `total_cost_usd` summed across turns. The `~` flags this as *notional*: it's the equivalent API-rate price, not real money on a subscription plan.
 
-Toggle with `CONTEXT_INDICATOR=on|off`; set the window with `CONTEXT_WINDOW_TOKENS`.
+**Optional dependency: `jq`** — only needed for the 5h/weekly % readout to populate reliably. Install with `brew install jq` (or your package manager). Without it, those percentages will show `n/a` whenever the SDK isn't emitting `rate_limit_event`. The script never leaks the OAuth token (passes it via stdin headers, unsets it immediately, never echoes it); the wormhole reads only the script's non-secret output JSON.
+
+Toggle the whole footer with `CONTEXT_INDICATOR=on|off`. `CONTEXT_WINDOW_TOKENS` only kicks in as a fallback when the SDK doesn't report a window.
 
 ### arch-common
 

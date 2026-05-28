@@ -64,12 +64,22 @@ export type SessionUsage = {
   fiveHourPct?: number;
   weeklyPct?: number;
   /**
-   * Latest turn's prompt size (input + cache_read + cache_creation) = the
-   * context the model saw, and the session peak. Drives the context bar.
-   * Read from the SDK result message, so present every turn (no transcript).
+   * Latest turn's prompt size = the context the model saw, and the session
+   * peak. Drives the context bar. Read from the SDK result message's
+   * `usage.iterations[last]` when present — per Anthropic SDK docs:
+   *   "Calculate the true context window size from the last iteration."
+   * Falls back to top-level usage when iterations[] is absent, but note that
+   * top-level fields are SUMMED across iterations (tool-use loops) and so
+   * overshoot the real context size when a turn has >1 iteration.
    */
   contextTokens?: number;
   peakContextTokens?: number;
+  /**
+   * Model context-window size, from `result.modelUsage[model].contextWindow`
+   * when present. Lets the footer scale against the model's real window
+   * instead of a config default. Undefined → fall back to CONTEXT_WINDOW_TOKENS.
+   */
+  contextWindowTokens?: number;
 };
 
 export type SessionOutput = {

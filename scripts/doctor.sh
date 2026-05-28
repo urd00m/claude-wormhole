@@ -82,6 +82,14 @@ else
   ok "Codex auth: not required (DEFAULT_RUNTIME=$DEFAULT_RT, no codex threads in data/runtimes.json)"
 fi
 
+# Optional: jq for the usage-quota fetch script. Footer falls back cleanly
+# without it, so this is a "nice to have," not a failure.
+if command -v jq >/dev/null 2>&1; then
+  ok "jq present (powers scripts/fetch-usage.sh for the 5h/weekly footer)"
+else
+  printf "  \033[33m!\033[0m jq not on PATH — footer's 5h/weekly %% will rely on SDK rate_limit_event only (often n/a). Install with: brew install jq\n"
+fi
+
 step "Type-check"
 if npx tsc --noEmit; then ok "clean"; else err "type errors"; FAIL=1; fi
 
