@@ -7,6 +7,7 @@ import { getCronStore } from "./scheduler/store.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { makeRunner } from "./scheduler/runner.js";
 import { clearAllOnBoot } from "./slack/activeMarker.js";
+import { ensureCommandsLinked } from "./skillsLink.js";
 
 async function main() {
   const auth = detectAuth();
@@ -19,6 +20,19 @@ async function main() {
     process.exit(1);
   }
   console.log(`🔐 Claude auth: ${describeAuth(auth)}`);
+
+  // Make the vendored arch-common command library available in every session
+  // (symlink into ~/.claude/commands). Best-effort: a failure here never
+  // blocks startup.
+  try {
+    const link = ensureCommandsLinked();
+    const icon = link.status === "linked" || link.status === "ok" ? "📚" : "⚠️";
+    console.log(`${icon} arch-common commands: ${link.message}`);
+  } catch (err) {
+    console.warn(
+      `[boot] ensureCommandsLinked failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Build the scheduler. Use a lazy getter for the cron MCP tool so a job
   // firing right at boot still sees the right Scheduler instance.

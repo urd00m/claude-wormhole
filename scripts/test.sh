@@ -52,6 +52,7 @@ TESTS=(
   src/agent/tools/cronDef.test.ts
   src/agent/tools/configToolsDef.test.ts
   src/configCodex.test.ts
+  src/skillsLink.test.ts
 )
 
 for t in "${TESTS[@]}"; do
