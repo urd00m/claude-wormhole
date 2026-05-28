@@ -1,191 +1,94 @@
-// Verify the context-usage indicator: getContextUsage parsing (via an
-// injected fake runner — no python, no real transcript) and the
-// formatContextFooter rendering. The skill (context_length.py) itself is
-// arch-common's; here we only test our glue + presentation.
+// Verify the context + usage footer, now computed entirely from the
+// in-process SessionUsage (no skill / no subprocess). The key property:
+// it renders on EVERY turn that has a context measurement.
 
-import { getContextUsage, formatContextFooter, formatUsageSegment, type ContextUsage } from "./contextIndicator.js";
+import { formatContextFooter, formatUsageSegment } from "./contextIndicator.js";
 import type { SessionUsage } from "../agent/runtime/types.js";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`ASSERT: ${msg}`);
 }
 
-/** A fake skill runner that returns a fixed --json payload. */
-function runnerReturning(json: unknown) {
-  return async () => JSON.stringify(json);
+function mk(over: Partial<SessionUsage>): SessionUsage {
+  return {
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    turns: 1,
+    contextTokens: 0,
+    peakContextTokens: 0,
+    ...over,
+  };
 }
 
+const WINDOW = 1_000_000;
+
 async function main() {
-  // ============ getContextUsage ============
-
-  // --- (1) valid skill JSON → parsed usage ---
+  // ============ formatUsageSegment ============
   {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: runnerReturning({
-        measured_prompt_tokens: 380_000,
-        window: 1_000_000,
-        used_pct: 38.0,
-        peak_prompt_tokens: 400_000,
-        estimated_next_prompt_tokens: 390_000,
-      }),
-    });
-    assert(u !== null, "valid → non-null");
-    assert(u!.measured === 380_000, `measured: ${u!.measured}`);
-    assert(u!.window === 1_000_000, "window");
-    assert(Math.abs(u!.usedPct - 38) < 0.01, `usedPct: ${u!.usedPct}`);
-    assert(u!.compaction === false, "no compaction (peak-measured small)");
-  }
-
-  // --- (2) used_pct missing → computed from measured/window ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: runnerReturning({ measured_prompt_tokens: 250_000, window: 1_000_000 }),
-    });
-    assert(u !== null && Math.abs(u.usedPct - 25) < 0.01, `computed pct: ${u?.usedPct}`);
-  }
-
-  // --- (3) compaction detected (peak well above measured) ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: runnerReturning({
-        measured_prompt_tokens: 200_000,
-        window: 1_000_000,
-        peak_prompt_tokens: 450_000, // 250k drop > 15% of 1M
-      }),
-    });
-    assert(u !== null && u.compaction === true, "compaction flagged");
-  }
-
-  // --- (4) runner throws (no transcript / python missing) → null ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: async () => {
-        throw new Error("no transcript for session sid");
-      },
-    });
-    assert(u === null, "runner error → null");
-  }
-
-  // --- (5) garbage stdout → null (never throws) ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: async () => "not json at all",
-    });
-    assert(u === null, "garbage → null");
-  }
-
-  // --- (6) malformed JSON (missing required fields) → null ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 1_000_000,
-      runner: runnerReturning({ window: 1_000_000 }), // no measured_prompt_tokens
-    });
-    assert(u === null, "missing measured → null");
-  }
-
-  // --- (7) window 0/negative guarded → null (no divide-by-zero) ---
-  {
-    const u = await getContextUsage("sid", {
-      windowTokens: 0,
-      runner: runnerReturning({ measured_prompt_tokens: 100, window: 0 }),
-    });
-    assert(u === null, "non-positive window → null");
+    const seg = formatUsageSegment(mk({ costUsd: 0.42, fiveHourPct: 42, weeklyPct: 18.4 }));
+    assert(seg.includes("5h 42%"), `5h pct: ${seg}`);
+    assert(seg.includes("wk 18%"), `weekly rounded: ${seg}`);
+    assert(seg.includes("$0.42"), `cost: ${seg}`);
+    const na = formatUsageSegment(mk({ costUsd: 0.1 }));
+    assert(na.includes("5h n/a") && na.includes("wk n/a"), `n/a fallback: ${na}`);
+    assert(na.includes("$0.10"), "cost shown when % n/a");
   }
 
   // ============ formatContextFooter ============
 
-  const mk = (over: Partial<ContextUsage>): ContextUsage => ({
-    measured: 0,
-    window: 1_000_000,
-    usedPct: 0,
-    peak: 0,
-    compaction: false,
-    ...over,
-  });
-
-  // --- (8) low usage → 🧠, mostly-empty bar ---
+  // --- (1) renders whenever there's a context measurement (every turn) ---
   {
-    const f = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }));
-    assert(f.includes("🧠"), `low emoji: ${f}`);
-    assert(f.includes("38%"), "pct shown");
-    assert(f.includes("380k/1M"), `human tokens: ${f}`);
-    // 38% of 5 slots → 2 filled
-    assert(f.includes("▰▰▱▱▱"), `bar fill: ${f}`);
+    const f = formatContextFooter(mk({ contextTokens: 380_000, costUsd: 0.42 }), WINDOW);
+    assert(f !== null, "footer renders with a context measurement");
+    assert(f!.includes("38%"), `pct: ${f}`);
+    assert(f!.includes("380k/1M"), `humanized tokens: ${f}`);
+    assert(f!.includes("📊"), "usage segment appended");
   }
 
-  // --- (9) mid usage (60–84%) → ⚠️ ---
+  // --- (2) null only when there's no measurement yet ---
   {
-    const f = formatContextFooter(mk({ measured: 700_000, usedPct: 70 }));
-    assert(f.includes("⚠️"), `mid emoji: ${f}`);
+    assert(formatContextFooter(mk({ contextTokens: 0 }), WINDOW) === null, "no measurement → null");
+    assert(formatContextFooter(mk({ contextTokens: undefined }), WINDOW) === null, "undefined → null");
+    assert(formatContextFooter(mk({ contextTokens: 100 }), 0) === null, "zero window → null");
   }
 
-  // --- (10) high usage (≥85%) → 🔴 ---
+  // --- (3) emoji buckets by fullness ---
   {
-    const f = formatContextFooter(mk({ measured: 920_000, usedPct: 92 }));
-    assert(f.includes("🔴"), `high emoji: ${f}`);
-    assert(f.includes("▰▰▰▰▰"), `near-full bar: ${f}`);
+    assert(formatContextFooter(mk({ contextTokens: 380_000 }), WINDOW)!.includes("🧠"), "low → 🧠");
+    assert(formatContextFooter(mk({ contextTokens: 700_000 }), WINDOW)!.includes("⚠️"), "mid → ⚠️");
+    assert(formatContextFooter(mk({ contextTokens: 920_000 }), WINDOW)!.includes("🔴"), "high → 🔴");
   }
 
-  // --- (11) compaction note appended ---
+  // --- (4) bar fill ---
   {
-    const f = formatContextFooter(mk({ measured: 200_000, usedPct: 20, compaction: true }));
-    assert(f.includes("compacted"), `compaction note: ${f}`);
+    assert(formatContextFooter(mk({ contextTokens: 380_000 }), WINDOW)!.includes("▰▰▱▱▱"), "38% → 2/5");
+    assert(formatContextFooter(mk({ contextTokens: 920_000 }), WINDOW)!.includes("▰▰▰▰▰"), "92% → 5/5");
   }
 
-  // --- (12) k/M humanization boundaries ---
+  // --- (5) compaction note when current dropped well below peak ---
   {
-    const f = formatContextFooter(mk({ measured: 200_000, window: 200_000, usedPct: 100 }));
-    assert(f.includes("200k/200k"), `200k formatting: ${f}`);
-    const g = formatContextFooter(mk({ measured: 1_500_000, window: 2_000_000, usedPct: 75 }));
-    assert(g.includes("1.5M/2M"), `M formatting: ${g}`);
+    const f = formatContextFooter(mk({ contextTokens: 200_000, peakContextTokens: 450_000 }), WINDOW);
+    assert(f!.includes("compacted"), `compaction note: ${f}`);
+    const g = formatContextFooter(mk({ contextTokens: 400_000, peakContextTokens: 420_000 }), WINDOW);
+    assert(!g!.includes("compacted"), "no compaction note for small drop");
   }
 
-  // --- (13) pct clamped to [0,100] for the bar ---
+  // --- (6) window humanization (200k tier) ---
   {
-    const f = formatContextFooter(mk({ usedPct: 130 }));
-    assert(f.includes("▰▰▰▰▰"), "over-100 clamps to full bar");
-    assert(f.includes("130%") === false, "displayed pct clamped");
-    assert(f.includes("100%"), `clamped display: ${f}`);
+    const f = formatContextFooter(mk({ contextTokens: 100_000 }), 200_000);
+    assert(f!.includes("100k/200k"), `200k tier: ${f}`);
+    assert(f!.includes("50%"), "pct against 200k window");
   }
 
-  // ============ usage tracker ============
+  // --- (7) over-full clamps to 100% / full bar ---
   {
-    // With quota %s known: lead with 5h + wk %, keep the $ amount.
-    const usage: SessionUsage = {
-      costUsd: 0.42,
-      inputTokens: 1_400_000,
-      outputTokens: 100_000,
-      turns: 5,
-      fiveHourPct: 42,
-      weeklyPct: 18.4,
-    };
-    const seg = formatUsageSegment(usage);
-    assert(seg.includes("5h 42%"), `5h pct: ${seg}`);
-    assert(seg.includes("wk 18%"), `weekly pct rounded: ${seg}`);
-    assert(seg.includes("$0.42"), `dollar kept alongside: ${seg}`);
-    assert(seg.includes("📊"), "usage emoji");
-
-    // Percentages unknown (SDK didn't report utilization) → "n/a", $ still shown.
-    const segNa = formatUsageSegment({ costUsd: 0.1, inputTokens: 0, outputTokens: 0, turns: 1 });
-    assert(segNa.includes("5h n/a") && segNa.includes("wk n/a"), `n/a fallback: ${segNa}`);
-    assert(segNa.includes("$0.10"), "dollar shown even when % n/a");
-
-    // formatContextFooter appends the usage segment when usage is present.
-    const withUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), usage);
-    assert(withUsage.includes("38%") && withUsage.includes("5h 42%"), `combined footer: ${withUsage}`);
-
-    // ...and omits it when usage is null/undefined.
-    const noUsage = formatContextFooter(mk({ measured: 380_000, usedPct: 38 }), null);
-    assert(!noUsage.includes("📊"), `no usage segment when null: ${noUsage}`);
+    const f = formatContextFooter(mk({ contextTokens: 1_500_000 }), WINDOW);
+    assert(f!.includes("100%") && f!.includes("▰▰▰▰▰"), `clamp: ${f}`);
   }
 
   console.log(
-    "✅ contextIndicator verified — getContextUsage (parse/compute/compaction/error/garbage/window-guard) + formatContextFooter (emoji buckets, bar fill, k/M, compaction, clamp) + usage tracker (segment, combined footer)",
+    "✅ contextIndicator verified — in-process footer (renders every turn, emoji buckets, bar, compaction, window scaling, clamp) + usage segment",
   );
 }
 

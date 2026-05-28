@@ -11,9 +11,15 @@
 // store re-reads the file whenever its mtime changes.
 
 import fs from "node:fs";
+import path from "node:path";
 import { MACROS_FILE } from "../config.js";
 
 export type MacroMap = Record<string, string>;
+
+/** A macro name must be a single non-whitespace token to ever match. */
+export function isValidMacroName(name: string): boolean {
+  return name.length > 0 && !/\s/.test(name);
+}
 
 export class MacroStore {
   private readonly file: string;
@@ -28,6 +34,34 @@ export class MacroStore {
   all(): MacroMap {
     this.refreshIfStale();
     return this.cache;
+  }
+
+  /** Define/overwrite a macro and persist. Throws on an invalid name. */
+  set(name: string, expansion: string): void {
+    if (!isValidMacroName(name)) throw new Error(`invalid macro name '${name}' (no whitespace, non-empty)`);
+    this.refreshIfStale();
+    this.cache[name] = expansion;
+    this.save();
+  }
+
+  /** Remove a macro and persist. Returns true if it existed. */
+  remove(name: string): boolean {
+    this.refreshIfStale();
+    if (!(name in this.cache)) return false;
+    delete this.cache[name];
+    this.save();
+    return true;
+  }
+
+  private save(): void {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2));
+    // Adopt the file's new mtime so the next all() doesn't needlessly reload.
+    try {
+      this.cachedMtimeMs = fs.statSync(this.file).mtimeMs;
+    } catch {
+      /* best-effort */
+    }
   }
 
   private refreshIfStale(): void {

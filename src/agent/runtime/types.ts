@@ -63,6 +63,13 @@ export type SessionUsage = {
    */
   fiveHourPct?: number;
   weeklyPct?: number;
+  /**
+   * Latest turn's prompt size (input + cache_read + cache_creation) = the
+   * context the model saw, and the session peak. Drives the context bar.
+   * Read from the SDK result message, so present every turn (no transcript).
+   */
+  contextTokens?: number;
+  peakContextTokens?: number;
 };
 
 export type SessionOutput = {

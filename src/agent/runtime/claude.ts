@@ -121,6 +121,15 @@ export class ClaudeRuntime implements Runtime {
   };
   /** Latest known rate-limit utilization (0–100), from rate_limit_event. */
   private rateLimits: { fiveHourPct?: number; weeklyPct?: number } = {};
+  /**
+   * Latest turn's prompt size (input + cache_read + cache_creation) = the
+   * context the model saw this turn, and the peak across the session. This
+   * is the SAME number the context_length skill extracts from the
+   * transcript, but read straight from the SDK result message — so it's
+   * available every turn with no transcript-flush race.
+   */
+  private contextTokens = 0;
+  private peakContextTokens = 0;
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -457,6 +466,9 @@ export class ClaudeRuntime implements Runtime {
       this.usage.inputTokens += turnInputTokens;
       this.usage.outputTokens += turnOutputTokens;
       this.usage.turns += 1;
+      // This turn's prompt size IS the current context size; track latest + peak.
+      this.contextTokens = turnInputTokens;
+      this.peakContextTokens = Math.max(this.peakContextTokens, turnInputTokens);
     }
     const out = finalText || "_(no response)_";
     hooks.onFinal?.(out);
@@ -470,6 +482,8 @@ export class ClaudeRuntime implements Runtime {
       ...this.usage,
       fiveHourPct: this.rateLimits.fiveHourPct,
       weeklyPct: this.rateLimits.weeklyPct,
+      contextTokens: this.contextTokens,
+      peakContextTokens: this.peakContextTokens,
     };
   }
 }

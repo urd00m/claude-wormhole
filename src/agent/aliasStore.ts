@@ -61,6 +61,37 @@ export class AliasStore {
     return this.cache;
   }
 
+  /** Define/overwrite an alias and persist. Throws on an invalid name/def. */
+  set(name: string, def: AliasDef): void {
+    if (name.trim().length === 0 || /\s/.test(name)) {
+      throw new Error(`invalid alias name '${name}' (no whitespace, non-empty)`);
+    }
+    const clean = validateDef(def);
+    if (!clean) throw new Error(`invalid alias definition for '${name}' (need runtime: claude|codex)`);
+    this.refreshIfStale();
+    this.cache[name] = clean;
+    this.save();
+  }
+
+  /** Remove an alias and persist. Returns true if it existed. */
+  remove(name: string): boolean {
+    this.refreshIfStale();
+    if (!(name in this.cache)) return false;
+    delete this.cache[name];
+    this.save();
+    return true;
+  }
+
+  private save(): void {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2));
+    try {
+      this.cachedMtimeMs = fs.statSync(this.file).mtimeMs;
+    } catch {
+      /* best-effort */
+    }
+  }
+
   private refreshIfStale(): void {
     let mtimeMs: number;
     try {

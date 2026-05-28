@@ -8,6 +8,7 @@ import { buildSlackMcp } from "../agent/tools/slackPost.js";
 import { buildCronMcp } from "../agent/tools/cron.js";
 import { buildWorkdirMcp } from "../agent/tools/workdir.js";
 import { buildSpawnMcp } from "../agent/tools/spawn.js";
+import { buildConfigMcp } from "../agent/tools/config.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
@@ -20,7 +21,7 @@ import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
 import { expandMacros, getMacroStore } from "../agent/macroStore.js";
 import { parseAliasInvocation, getAliasStore, getActiveAliasStore } from "../agent/aliasStore.js";
 import { getWorkdirStore, resolveWorkdir } from "../agent/workdirStore.js";
-import { getContextUsage, formatContextFooter } from "./contextIndicator.js";
+import { formatContextFooter } from "./contextIndicator.js";
 import { env } from "../config.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
@@ -255,6 +256,9 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           buildCanUseTool: () => buildCanUseTool(canUseToolCtx),
           onTaskEvent: taskEventPoster,
         }),
+        // macro/alias management — lets the user add macros/aliases by
+        // asking the bot, instead of hand-editing data/*.json.
+        config: buildConfigMcp(),
       };
       if (_scheduler) {
         mcpServers.cron = buildCronMcp({
@@ -280,15 +284,15 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         },
       );
 
-      // Per-session context-usage footer (Claude threads only). Best-effort:
-      // appended after the canonical final text (set via onFinal above) so it
-      // rides the same finalize() flush. Any failure → no footer, never an
-      // error in the reply.
+      // Per-session context + usage footer (Claude threads only). Built from
+      // the in-process usage snapshot (no transcript read), so it renders on
+      // every turn. Appended after the canonical final text (onFinal above)
+      // so it rides the same finalize() flush.
       if (env.CONTEXT_INDICATOR === "on") {
-        const ctxSessionId = entry.session.contextSessionId();
-        if (ctxSessionId) {
-          const usage = await getContextUsage(ctxSessionId);
-          if (usage) streamer.appendText(`\n\n${formatContextFooter(usage, entry.session.usageSnapshot())}`);
+        const usage = entry.session.usageSnapshot();
+        if (usage) {
+          const footer = formatContextFooter(usage, env.CONTEXT_WINDOW_TOKENS);
+          if (footer) streamer.appendText(`\n\n${footer}`);
         }
       }
 

@@ -20,6 +20,12 @@ const SUBAGENT_BLOCKED_TOOLS = new Set([
   "mcp__workdir__reset_workdir",
   "mcp__cron__cron_add",
   "mcp__cron__cron_remove",
+  // Macro/alias management mutates persistent user config — a sub-agent
+  // shouldn't be able to define/remove the user's macros or aliases.
+  "mcp__config__macro_set",
+  "mcp__config__macro_remove",
+  "mcp__config__alias_set",
+  "mcp__config__alias_remove",
 ]);
 
 /**
