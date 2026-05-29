@@ -167,6 +167,20 @@ Every whole-token, case-sensitive occurrence in a message is replaced before the
 - **Resident workers (Claude):** `mcp__spawn__spawn` with `name` + `resident: true` launches a long-lived process that stays warm across calls, keeping its context in memory (no resume). Same name → same worker. `worker_list` and `worker_kill` manage them; `end session` kills a thread's workers.
 - **Codex can spawn too:** a Codex worker gets its own `spawn` tool (via a stdio MCP server), so it's no longer one-shot — `codex→codex` recurses (depth-capped) and `codex→claude` delegates to a Claude leaf.
 
+#### Long-task timers (2 h default)
+
+The bundled Claude CLI ships with three default timers that quietly kill long-running spawn workers: `MCP_TOOL_TIMEOUT` (60 s hard wall clock per MCP tool call — kills `mcp__spawn__spawn` after 60 s no matter what), `MCP_TIMEOUT` (sibling default for non-tool MCP requests), and `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (10 min idle-watchdog that trips on long background-bash waits). The wormhole sets each to **2 hours** at boot and in every spawned-worker subprocess. Resident workers' stall watchdog stays at **24 h** because they sit idle between calls by design.
+
+Override any of these by exporting them before starting the bot — your value wins:
+
+```bash
+export MCP_TOOL_TIMEOUT=14400000   # 4 h
+export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=14400000
+npm run dev
+```
+
+The Slack consent prompt (rare under `bypassPermissions`) also defaults to 2 h before auto-deny.
+
 ### Context + usage footer (Claude)
 
 Each Claude reply ends with `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42`:

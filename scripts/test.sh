@@ -54,6 +54,7 @@ TESTS=(
   src/configCodex.test.ts
   src/skillsLink.test.ts
   src/usageStore.test.ts
+  src/agent/tools/spawn.envTimers.test.ts
 )
 
 for t in "${TESTS[@]}"; do
