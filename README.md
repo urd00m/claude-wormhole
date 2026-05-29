@@ -173,7 +173,7 @@ The bundled Claude CLI exposes a few env knobs that govern how long an MCP tool 
 
 | Knob | One-shot worker | Resident worker | Main bot |
 |---|---|---|---|
-| `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (idle watchdog — has fired in this repo, kills workers waiting on background bash) | **1 h** | **24 h** (residents idle by design) | unset (CLI default) |
+| `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (idle watchdog — has fired in this repo, kills workers waiting on background bash) | **2 h** | **24 h** (residents idle by design) | unset (CLI default) |
 | `MCP_TOOL_TIMEOUT` / `MCP_TIMEOUT` (per-MCP-call wall clock — defensive bump; no observed firings) | **2 h** | **2 h** | **2 h** |
 
 Any value the user exports wins — we only set the env var when it's missing. Override before `npm run dev`:

@@ -476,8 +476,8 @@ function buildWorkerKillTool(registry: ResidentWorkerRegistry, threadKey: string
 
 /**
  * Env for spawned worker CLI subprocesses. Inherits the wormhole node's
- * process.env, then forces CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS to 1 h
- * (3,600,000 ms) unless the user has already set it.
+ * process.env, then forces CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS to 2 h
+ * (7,200,000 ms) unless the user has already set it.
  *
  * Why: the bundled Claude CLI runs a built-in async-agent stall watchdog
  * (default 600,000 ms = 10 min) that aborts a recursively-spawned worker's
@@ -490,15 +490,16 @@ function buildWorkerKillTool(registry: ResidentWorkerRegistry, threadKey: string
  * `mcp__spawn__spawn` from that worker fails synchronously with
  * "Stream closed" until the worker exits.
  *
- * Real benches in this repo run 15–30 min. 1 h headroom covers them with
- * a comfortable margin. Override via env if a longer bench is needed.
+ * 2 h covers every long task this repo actually runs (15–30 min benches,
+ * multi-step Codex chains, long verifier loops). Override via env if a
+ * longer bench is needed.
  *
- * MCP_TOOL_TIMEOUT / MCP_TIMEOUT are bumped to 2 h as defense-in-depth
- * against the bundled CLI's per-MCP-call wall clock (the `cXK = 60000`
- * floor we observed in the binary). Cheap to set; harmless if the default
- * was already generous.
+ * MCP_TOOL_TIMEOUT / MCP_TIMEOUT are also bumped to 2 h as
+ * defense-in-depth against the bundled CLI's per-MCP-call wall clock
+ * (the `cXK = 60000` floor we observed in the binary). Cheap to set;
+ * harmless if the default was already generous.
  */
-const WORKER_STALL_TIMEOUT_MS = "3600000"; // 1 h — proven enough for current benches
+const WORKER_STALL_TIMEOUT_MS = "7200000"; // 2 h — covers benches with comfortable margin
 const WORKER_MCP_TIMEOUT_MS = "7200000";   // 2 h — defensive; no evidence it's ever fired
 
 export function buildWorkerEnv(): Record<string, string> {
