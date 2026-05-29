@@ -1,9 +1,10 @@
-// Verify the spawn-worker env applies the right timers to each CLI knob,
-// and that user-supplied values win on all of them.
-//   - Stall watchdog: 2 h for one-shot workers, 24 h for residents (they
-//     sit idle by design).
-//   - MCP_TOOL_TIMEOUT / MCP_TIMEOUT: 2 h everywhere — defense-in-depth
-//     against the bundled CLI's per-MCP-call wall-clock floor.
+// Verify the spawn-worker / resident-worker env sets the async-agent
+// stall watchdog (the only CLI timer with documented firings in this
+// repo) and that user-supplied values win.
+//   - One-shot worker: stall = 2 h.
+//   - Resident worker: stall = 24 h (residents sit idle by design).
+// MCP_TOOL_TIMEOUT / MCP_TIMEOUT are NOT set by us — we don't have
+// evidence they were ever firing, so we leave them to the CLI's default.
 
 import { buildWorkerEnv } from "./spawn.js";
 import { buildResidentEnv } from "../runtime/residentWorker.js";
@@ -33,56 +34,41 @@ function withEnv<T>(over: Record<string, string | undefined>, fn: () => T): T {
 }
 
 function main() {
-  // --- buildWorkerEnv defaults: stall = 2 h, MCP timers = 2 h ---
+  // --- buildWorkerEnv: stall = 2 h, MCP timers left to CLI default ---
   {
     const env = withEnv(
-      {
-        CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: undefined,
-        MCP_TOOL_TIMEOUT: undefined,
-        MCP_TIMEOUT: undefined,
-      },
+      { CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: undefined, MCP_TOOL_TIMEOUT: undefined, MCP_TIMEOUT: undefined },
       () => buildWorkerEnv(),
     );
     assert(env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS === TWO_HOURS, `worker stall 2h: ${env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS}`);
-    assert(env.MCP_TOOL_TIMEOUT === TWO_HOURS, `worker MCP_TOOL_TIMEOUT: ${env.MCP_TOOL_TIMEOUT}`);
-    assert(env.MCP_TIMEOUT === TWO_HOURS, `worker MCP_TIMEOUT: ${env.MCP_TIMEOUT}`);
+    assert(env.MCP_TOOL_TIMEOUT === undefined, `MCP_TOOL_TIMEOUT not set: ${env.MCP_TOOL_TIMEOUT}`);
+    assert(env.MCP_TIMEOUT === undefined, `MCP_TIMEOUT not set: ${env.MCP_TIMEOUT}`);
   }
 
-  // --- buildWorkerEnv: user-supplied values win on all three ---
+  // --- buildWorkerEnv: user-supplied stall wins; user-supplied MCP timeouts pass through unchanged ---
   {
     const env = withEnv(
-      {
-        CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: "999",
-        MCP_TOOL_TIMEOUT: "888",
-        MCP_TIMEOUT: "777",
-      },
+      { CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: "999", MCP_TOOL_TIMEOUT: "888", MCP_TIMEOUT: "777" },
       () => buildWorkerEnv(),
     );
     assert(env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS === "999", "user stall wins");
-    assert(env.MCP_TOOL_TIMEOUT === "888", "user MCP_TOOL_TIMEOUT wins");
-    assert(env.MCP_TIMEOUT === "777", "user MCP_TIMEOUT wins");
+    assert(env.MCP_TOOL_TIMEOUT === "888", "user-supplied MCP_TOOL_TIMEOUT pass-through");
+    assert(env.MCP_TIMEOUT === "777", "user-supplied MCP_TIMEOUT pass-through");
   }
 
-  // --- buildResidentEnv defaults: stall=24h, MCP timers=2h ---
-  // Resident workers sit IDLE between calls by design, so the stall
-  // watchdog stays at 24h; the per-call MCP timeouts get the same 2h
-  // treatment as one-shot workers.
+  // --- buildResidentEnv: stall = 24 h, MCP timers left to CLI default ---
   {
     const env = withEnv(
-      {
-        CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: undefined,
-        MCP_TOOL_TIMEOUT: undefined,
-        MCP_TIMEOUT: undefined,
-      },
+      { CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: undefined, MCP_TOOL_TIMEOUT: undefined, MCP_TIMEOUT: undefined },
       () => buildResidentEnv(),
     );
     assert(env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS === TWENTY_FOUR_HOURS, `resident stall 24h: ${env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS}`);
-    assert(env.MCP_TOOL_TIMEOUT === TWO_HOURS, `resident MCP_TOOL_TIMEOUT: ${env.MCP_TOOL_TIMEOUT}`);
-    assert(env.MCP_TIMEOUT === TWO_HOURS, `resident MCP_TIMEOUT: ${env.MCP_TIMEOUT}`);
+    assert(env.MCP_TOOL_TIMEOUT === undefined, "resident MCP_TOOL_TIMEOUT not set");
+    assert(env.MCP_TIMEOUT === undefined, "resident MCP_TIMEOUT not set");
   }
 
   console.log(
-    "✅ env-timers verified — 2 h stall (one-shot) / 24 h stall (resident), 2 h MCP timeouts on both, user overrides win on every knob",
+    "✅ env-timers verified — 2 h stall (one-shot) / 24 h stall (resident); MCP_TOOL_TIMEOUT and MCP_TIMEOUT left to CLI defaults; user overrides pass through",
   );
 }
 

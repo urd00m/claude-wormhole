@@ -9,26 +9,7 @@ import { makeRunner } from "./scheduler/runner.js";
 import { clearAllOnBoot } from "./slack/activeMarker.js";
 import { ensureCommandsLinked } from "./skillsLink.js";
 
-/**
- * Bump the bundled Claude CLI's MCP timeouts to 2 h before any SDK call
- * spawns it. The SDK launches the CLI as a subprocess that inherits this
- * process.env, so setting these here propagates to it.
- *   - MCP_TOOL_TIMEOUT — hard wall clock per MCP tool call (low default
- *     would abort long-running spawn calls).
- *   - MCP_TIMEOUT — sibling default for non-tool MCP requests.
- * User-provided values win — we only set the var when it's missing. We
- * intentionally do NOT touch CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS for the
- * main bot process — that watchdog is meant to catch a genuinely stuck
- * main agent, and we don't have evidence it was firing falsely here.
- */
-const LONG_TASK_TIMEOUT_MS = "7200000"; // 2 h
-function applyLongTaskTimers(): void {
-  if (!process.env.MCP_TOOL_TIMEOUT) process.env.MCP_TOOL_TIMEOUT = LONG_TASK_TIMEOUT_MS;
-  if (!process.env.MCP_TIMEOUT) process.env.MCP_TIMEOUT = LONG_TASK_TIMEOUT_MS;
-}
-
 async function main() {
-  applyLongTaskTimers();
   const auth = detectAuth();
   if (auth.kind === "none") {
     console.error(

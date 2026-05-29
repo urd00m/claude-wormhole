@@ -97,19 +97,12 @@ export type ResidentWorkerOpts = {
 };
 
 /**
- * Env for the resident worker's CLI subprocess. We bump three CLI timers
- * that would otherwise kill long-running work:
- *   - CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS — kept at 24 h. Resident workers
- *     sit IDLE between invocations by design, so the stall watchdog needs
- *     to be set very high; one-shot workers use 2 h, residents 24 h.
- *   - MCP_TOOL_TIMEOUT — 2 h. The CLI's hard wall clock on a single MCP
- *     tool call (default 60s); without this, any tool the resident calls
- *     that takes longer than 60s aborts mid-flight.
- *   - MCP_TIMEOUT — 2 h. Sibling default for non-tool MCP requests.
- * Each is only set if the user hasn't already exported a value.
+ * Env for the resident worker's CLI subprocess. We bump the async-agent
+ * stall watchdog to 24 h — resident workers sit IDLE between invocations
+ * by design, so they must not be reaped by the default 10-min watchdog.
+ * One-shot workers use 2 h (see buildWorkerEnv); residents go further
+ * because their idle periods are open-ended. User overrides win.
  */
-const RESIDENT_LONG_TASK_TIMEOUT_MS = "7200000"; // 2 h
-
 export function buildResidentEnv(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -118,8 +111,6 @@ export function buildResidentEnv(): Record<string, string> {
   if (!out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) {
     out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = String(24 * 60 * 60 * 1000);
   }
-  if (!out.MCP_TOOL_TIMEOUT) out.MCP_TOOL_TIMEOUT = RESIDENT_LONG_TASK_TIMEOUT_MS;
-  if (!out.MCP_TIMEOUT) out.MCP_TIMEOUT = RESIDENT_LONG_TASK_TIMEOUT_MS;
   return out;
 }
 

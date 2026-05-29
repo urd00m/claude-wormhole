@@ -493,14 +493,8 @@ function buildWorkerKillTool(registry: ResidentWorkerRegistry, threadKey: string
  * 2 h covers every long task this repo actually runs (15–30 min benches,
  * multi-step Codex chains, long verifier loops). Override via env if a
  * longer bench is needed.
- *
- * MCP_TOOL_TIMEOUT / MCP_TIMEOUT are also bumped to 2 h as
- * defense-in-depth against the bundled CLI's per-MCP-call wall clock
- * (the `cXK = 60000` floor we observed in the binary). Cheap to set;
- * harmless if the default was already generous.
  */
 const WORKER_STALL_TIMEOUT_MS = "7200000"; // 2 h — covers benches with comfortable margin
-const WORKER_MCP_TIMEOUT_MS = "7200000";   // 2 h — defensive; no evidence it's ever fired
 
 export function buildWorkerEnv(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -508,7 +502,5 @@ export function buildWorkerEnv(): Record<string, string> {
     if (typeof v === "string") out[k] = v;
   }
   if (!out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = WORKER_STALL_TIMEOUT_MS;
-  if (!out.MCP_TOOL_TIMEOUT) out.MCP_TOOL_TIMEOUT = WORKER_MCP_TIMEOUT_MS;
-  if (!out.MCP_TIMEOUT) out.MCP_TIMEOUT = WORKER_MCP_TIMEOUT_MS;
   return out;
 }

@@ -169,18 +169,19 @@ Every whole-token, case-sensitive occurrence in a message is replaced before the
 
 #### Long-task timers
 
-The bundled Claude CLI exposes a few env knobs that govern how long an MCP tool call or an idle agent can run before the CLI gives up. Defaults:
+The bundled Claude CLI's async-agent stall watchdog (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, default 10 min) has documented history of falsely killing spawned workers that are waiting on real work (e.g. a `run_in_background: true` Bash + `ScheduleWakeup` long bench — the bash tool returns in ms, so the SDK sees an idle agent). We bump it for both worker types:
 
-| Knob | One-shot worker | Resident worker | Main bot |
-|---|---|---|---|
-| `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (idle watchdog — has fired in this repo, kills workers waiting on background bash) | **2 h** | **24 h** (residents idle by design) | unset (CLI default) |
-| `MCP_TOOL_TIMEOUT` / `MCP_TIMEOUT` (per-MCP-call wall clock — defensive bump; no observed firings) | **2 h** | **2 h** | **2 h** |
+| Worker | `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` |
+|---|---|
+| One-shot spawn | **2 h** |
+| Resident | **24 h** (residents sit idle between calls by design) |
+| Main bot | unset — uses the CLI default |
 
-Any value the user exports wins — we only set the env var when it's missing. Override before `npm run dev`:
+The CLI also has `MCP_TOOL_TIMEOUT` / `MCP_TIMEOUT` env vars governing per-MCP-call wall clocks. **We don't touch these** — we don't have evidence they were firing for us, and the bundled CLI's actual default behavior when they're unset isn't documented. Override yourself if you ever observe a 60-second-ish abort on an MCP tool call:
 
 ```bash
-export MCP_TOOL_TIMEOUT=14400000   # 4 h
-export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=14400000
+export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=14400000   # 4 h, overrides our 2 h
+export MCP_TOOL_TIMEOUT=14400000                       # ours doesn't set it; this would
 npm run dev
 ```
 
