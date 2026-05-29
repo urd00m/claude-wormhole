@@ -167,19 +167,22 @@ Every whole-token, case-sensitive occurrence in a message is replaced before the
 - **Resident workers (Claude):** `mcp__spawn__spawn` with `name` + `resident: true` launches a long-lived process that stays warm across calls, keeping its context in memory (no resume). Same name → same worker. `worker_list` and `worker_kill` manage them; `end session` kills a thread's workers.
 - **Codex can spawn too:** a Codex worker gets its own `spawn` tool (via a stdio MCP server), so it's no longer one-shot — `codex→codex` recurses (depth-capped) and `codex→claude` delegates to a Claude leaf.
 
-#### Long-task timers (2 h default)
+#### Long-task timers
 
-The bundled Claude CLI ships with three default timers that quietly kill long-running spawn workers: `MCP_TOOL_TIMEOUT` (60 s hard wall clock per MCP tool call — kills `mcp__spawn__spawn` after 60 s no matter what), `MCP_TIMEOUT` (sibling default for non-tool MCP requests), and `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (10 min idle-watchdog that trips on long background-bash waits). The wormhole sets each to **2 hours** at boot and in every spawned-worker subprocess. Resident workers' stall watchdog stays at **24 h** because they sit idle between calls by design.
+The bundled Claude CLI exposes a few env knobs that govern how long an MCP tool call or an idle agent can run before the CLI gives up. Defaults:
 
-Override any of these by exporting them before starting the bot — your value wins:
+| Knob | One-shot worker | Resident worker | Main bot |
+|---|---|---|---|
+| `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` (idle watchdog — has fired in this repo, kills workers waiting on background bash) | **1 h** | **24 h** (residents idle by design) | unset (CLI default) |
+| `MCP_TOOL_TIMEOUT` / `MCP_TIMEOUT` (per-MCP-call wall clock — defensive bump; no observed firings) | **2 h** | **2 h** | **2 h** |
+
+Any value the user exports wins — we only set the env var when it's missing. Override before `npm run dev`:
 
 ```bash
 export MCP_TOOL_TIMEOUT=14400000   # 4 h
 export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=14400000
 npm run dev
 ```
-
-The Slack consent prompt (rare under `bypassPermissions`) also defaults to 2 h before auto-deny.
 
 ### Context + usage footer (Claude)
 

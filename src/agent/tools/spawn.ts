@@ -475,49 +475,39 @@ function buildWorkerKillTool(registry: ResidentWorkerRegistry, threadKey: string
 }
 
 /**
-/**
- * 2 hours in ms. Applied to every CLI timer that would otherwise kill a
- * legitimately long-running spawn worker: the MCP tool-call wall clock
- * (default 60s — kills `mcp__spawn__spawn` after 60s no matter what), the
- * sibling MCP request timeout, and the async-agent stall watchdog
- * (default 10 min — kills idle workers waiting on background bash).
- * Each is only set if the user hasn't already exported their own value.
- */
-const LONG_TASK_TIMEOUT_MS = "7200000";
-
-/**
  * Env for spawned worker CLI subprocesses. Inherits the wormhole node's
- * process.env, then bumps the CLI's three "task killer" timers to 2 h
- * unless the user has already set them.
+ * process.env, then forces CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS to 1 h
+ * (3,600,000 ms) unless the user has already set it.
  *
- * Why each one matters:
- *   - MCP_TOOL_TIMEOUT — the CLI's hard wall-clock cap on a single MCP
- *     tool call (default 60s, "progress notifications do not extend it").
- *     A bench launched via mcp__spawn__spawn that takes 5 min hits this
- *     and the call aborts mid-flight; the worker process keeps running
- *     but its IPC channel back to the parent is gone.
- *   - MCP_TIMEOUT — sibling default for non-tool MCP requests.
- *   - CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS — the SDK's built-in idle
- *     watchdog (default 10 min). Triggers when there's no tool_use in
- *     flight from the SDK's view, which is exactly what happens during
- *     long benches launched via `run_in_background: true` Bash +
- *     ScheduleWakeup — the worker is genuinely waiting on real work, but
- *     the background-bash tool_result returned in ms, so the SDK sees an
- *     idle agent. Once it fires, every subsequent `mcp__spawn__spawn`
- *     from that worker fails synchronously with "Stream closed" until
- *     the worker exits.
+ * Why: the bundled Claude CLI runs a built-in async-agent stall watchdog
+ * (default 600,000 ms = 10 min) that aborts a recursively-spawned worker's
+ * MCP control stream after that much idle time. Idle here means "no
+ * tool_use in flight from the SDK's view," which is exactly what happens
+ * during long benches launched via `run_in_background: true` Bash +
+ * ScheduleWakeup — the worker is genuinely waiting on real work, but the
+ * background-bash tool_result returned in milliseconds so the SDK sees an
+ * idle agent. Once the watchdog aborts, every subsequent
+ * `mcp__spawn__spawn` from that worker fails synchronously with
+ * "Stream closed" until the worker exits.
  *
- * Two hours covers every long task this repo actually runs (15–30 min
- * benches, multi-step Codex chains, long verifier loops). If you need
- * more, export the env var with your own value before starting the bot.
+ * Real benches in this repo run 15–30 min. 1 h headroom covers them with
+ * a comfortable margin. Override via env if a longer bench is needed.
+ *
+ * MCP_TOOL_TIMEOUT / MCP_TIMEOUT are bumped to 2 h as defense-in-depth
+ * against the bundled CLI's per-MCP-call wall clock (the `cXK = 60000`
+ * floor we observed in the binary). Cheap to set; harmless if the default
+ * was already generous.
  */
+const WORKER_STALL_TIMEOUT_MS = "3600000"; // 1 h — proven enough for current benches
+const WORKER_MCP_TIMEOUT_MS = "7200000";   // 2 h — defensive; no evidence it's ever fired
+
 export function buildWorkerEnv(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") out[k] = v;
   }
-  if (!out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = LONG_TASK_TIMEOUT_MS;
-  if (!out.MCP_TOOL_TIMEOUT) out.MCP_TOOL_TIMEOUT = LONG_TASK_TIMEOUT_MS;
-  if (!out.MCP_TIMEOUT) out.MCP_TIMEOUT = LONG_TASK_TIMEOUT_MS;
+  if (!out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) out.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = WORKER_STALL_TIMEOUT_MS;
+  if (!out.MCP_TOOL_TIMEOUT) out.MCP_TOOL_TIMEOUT = WORKER_MCP_TIMEOUT_MS;
+  if (!out.MCP_TIMEOUT) out.MCP_TIMEOUT = WORKER_MCP_TIMEOUT_MS;
   return out;
 }

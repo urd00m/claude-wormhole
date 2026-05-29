@@ -10,25 +10,21 @@ import { clearAllOnBoot } from "./slack/activeMarker.js";
 import { ensureCommandsLinked } from "./skillsLink.js";
 
 /**
- * Bump the bundled Claude CLI's "task killer" timers to 2 h before any
- * SDK call spawns it. The SDK launches the CLI as a subprocess that
- * inherits this process.env, so setting these here propagates to it.
- *   - MCP_TOOL_TIMEOUT: default 60s hard wall clock on every MCP tool call.
- *     Without this, mcp__spawn__spawn (and any other MCP tool) aborts
- *     mid-flight if its handler takes longer than 60s.
- *   - MCP_TIMEOUT: sibling 60s default for non-tool MCP requests.
- *   - CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: 10-min idle watchdog. Long
- *     waits on background bash + ScheduleWakeup trip this even though the
- *     worker is doing useful work.
- * User-provided values win — we only set the var when it's missing.
+ * Bump the bundled Claude CLI's MCP timeouts to 2 h before any SDK call
+ * spawns it. The SDK launches the CLI as a subprocess that inherits this
+ * process.env, so setting these here propagates to it.
+ *   - MCP_TOOL_TIMEOUT — hard wall clock per MCP tool call (low default
+ *     would abort long-running spawn calls).
+ *   - MCP_TIMEOUT — sibling default for non-tool MCP requests.
+ * User-provided values win — we only set the var when it's missing. We
+ * intentionally do NOT touch CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS for the
+ * main bot process — that watchdog is meant to catch a genuinely stuck
+ * main agent, and we don't have evidence it was firing falsely here.
  */
 const LONG_TASK_TIMEOUT_MS = "7200000"; // 2 h
 function applyLongTaskTimers(): void {
   if (!process.env.MCP_TOOL_TIMEOUT) process.env.MCP_TOOL_TIMEOUT = LONG_TASK_TIMEOUT_MS;
   if (!process.env.MCP_TIMEOUT) process.env.MCP_TIMEOUT = LONG_TASK_TIMEOUT_MS;
-  if (!process.env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS) {
-    process.env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS = LONG_TASK_TIMEOUT_MS;
-  }
 }
 
 async function main() {

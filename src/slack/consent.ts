@@ -10,12 +10,7 @@ type Pending = {
 
 const pending = new Map<string, Pending>();
 
-// 2 h. Long enough not to auto-deny while the user is in a meeting, short
-// enough that a forgotten consent prompt eventually frees its resources.
-// Matches the bot-wide "2 h for everything that can kill a long task"
-// policy (see index.ts applyLongTaskTimers). Consent gates are rare under
-// bypassPermissions anyway — this is mostly the destructive-bash heuristic.
-const CONSENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type ConsentRequest = {
   client: WebClient;
