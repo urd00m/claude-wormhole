@@ -21,6 +21,7 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Sub-agents** — the agent can spawn sub-agents (via the `mcp__spawn__spawn` tool) for parallel or context-isolated work. Claude can also launch **resident workers** that stay warm across calls, and **Codex workers can now spawn too** (codex→codex and codex→claude). See [Features](#features).
 - **Launch aliases** — define named agent configs in `data/aliases.json` (runtime, model, effort, extra CLI args) and start a thread with `custom_claude ~/code/myrepo <prompt>`.
 - **Text macros** — define shorthand in `data/macros.json`; any whole-token match in a message expands before the agent runs.
+- **Shell passthrough** — a message starting with `!` is run verbatim through `bash -lc` in the thread's workdir (bypasses the agent). `!ls`, `!git status`, etc. 60s timeout, 32 KB output cap.
 - **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42` showing context-window fullness (from the SDK's `getContextUsage`), subscription quota (from `/api/oauth/usage` via `scripts/fetch-usage.sh` — needs `jq`), and notional API-equivalent cost.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
@@ -160,6 +161,20 @@ Pure text expansion. Define in `data/macros.json`:
 ```
 
 Every whole-token, case-sensitive occurrence in a message is replaced before the agent runs (`swd to foo` → `set working dir to … to foo`). Hand-edit the file; changes apply without a restart.
+
+### Shell passthrough (`!cmd`)
+
+A Slack message that starts with `!` (after any bot mention) is run **verbatim** through `bash -lc` in the thread's workdir, **bypassing the agent**. The output is posted back as a code block.
+
+```
+!ls -la
+!git status
+!pwd && find . -name '*.ts' | head
+```
+
+Working directory: the thread's pinned workdir (set via `swd`-style phrases, the `set_workdir` MCP tool, or a launch alias). Falls back to `$HOME` if the thread hasn't pinned one.
+
+Guards: 60s wall-clock timeout (kills the whole process group), 32 KB stdout/stderr cap with a `truncated` marker. No interactivity (stdin is closed) — a command that prompts for input will time out. No agent, no MCP, no consent gate — the trusted Slack user is the only authorization. Use with the same care as a local shell.
 
 ### Sub-agents & resident workers
 

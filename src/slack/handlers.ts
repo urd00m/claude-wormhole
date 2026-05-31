@@ -21,6 +21,9 @@ import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
 import { expandMacros, getMacroStore } from "../agent/macroStore.js";
 import { parseAliasInvocation, getAliasStore, getActiveAliasStore } from "../agent/aliasStore.js";
 import { getWorkdirStore, resolveWorkdir } from "../agent/workdirStore.js";
+import { detectBangCommand } from "./bangPrefix.js";
+import { shellExec, formatShellResultForSlack } from "./shellExec.js";
+import os from "node:os";
 import { formatContextFooter } from "./contextIndicator.js";
 import { getUsageStore } from "../usageStore.js";
 import { env } from "../config.js";
@@ -85,6 +88,25 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
 
   const replyThreadTs = msg.thread_ts ?? msg.ts;
   const key = threadKeyOf(msg.channel, replyThreadTs);
+
+  // `!`-prefix shell passthrough. Runs the rest of the message verbatim
+  // through `bash -lc` in the thread's workdir (or $HOME if unset), with
+  // a 60s timeout and 32 KB output cap, posts the result back as a code
+  // block. Bypasses the agent entirely — no MCP, no canUseTool, no
+  // session creation. Checked FIRST so `!end session` is a literal
+  // command, not the end-session control phrase.
+  const bang = detectBangCommand(msg.text);
+  if (bang) {
+    inFlight.delete(dedupeKey);
+    const workdir = getWorkdirStore().get(key) ?? os.homedir();
+    const result = await shellExec(bang.command, { cwd: workdir });
+    await client.chat.postMessage({
+      channel: msg.channel,
+      thread_ts: replyThreadTs,
+      text: formatShellResultForSlack(bang.command, result, workdir),
+    });
+    return;
+  }
 
   // Control phrase: explicit end-session. Short-circuits BEFORE sessions.get
   // so we never spin up (and then have to tear down) a fresh session — and

@@ -55,6 +55,8 @@ TESTS=(
   src/skillsLink.test.ts
   src/usageStore.test.ts
   src/agent/tools/spawn.envTimers.test.ts
+  src/slack/bangPrefix.test.ts
+  src/slack/shellExec.test.ts
 )
 
 for t in "${TESTS[@]}"; do
