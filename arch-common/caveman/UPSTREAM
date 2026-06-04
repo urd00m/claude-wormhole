@@ -1,0 +1,5 @@
+repo: https://github.com/JuliusBrussee/caveman
+commit: 655b7d9c5431f822264b7732e9901c5578ac84cf
+vendored: 2026-06-04T04:34:06Z
+contents: hooks/caveman-{activate,config,mode-tracker,stats}.js + package.json; skills/caveman/{SKILL,README}.md
+notes: Update by re-running scripts/update-caveman.sh (not yet built) or by manual copy from upstream.

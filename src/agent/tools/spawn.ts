@@ -15,6 +15,8 @@ import type { TaskEvent } from "../session.js";
 import { CodexRuntime } from "../runtime/codex.js";
 import type { CodexProcessFactory } from "../runtime/codexProcess.js";
 import { getResidentWorkerRegistry, type ResidentWorkerRegistry } from "../residentWorkerRegistry.js";
+import { getCavemanStore } from "../cavemanStore.js";
+import { ensureCavemanReady } from "../../cavemanLink.js";
 
 /** Result shape shared by the resident-worker tool handlers. */
 export type SpawnToolResult = {
@@ -116,6 +118,15 @@ export async function runClaudeWorker(
   let finalText = "";
   let resultText: string | null = null;
   let outcome: "completed" | "failed" = "completed";
+  // Caveman propagation — same per-call lookup pattern as ClaudeRuntime,
+  // so a recursive worker spawned mid-flight picks up the current
+  // global level on its next-spawn.
+  const cavemanLevel = getCavemanStore().get();
+  const cavemanArt = cavemanLevel === "off" ? null : ensureCavemanReady();
+  const cavemanWorkerExtraArgs =
+    cavemanArt && cavemanLevel !== "off" ? { settings: cavemanArt.settingsPath } : undefined;
+  const cavemanWorkerEnv =
+    cavemanArt && cavemanLevel !== "off" ? { CAVEMAN_DEFAULT_MODE: cavemanLevel } : {};
   try {
     const workerQ = query({
       prompt,
@@ -131,7 +142,8 @@ export async function runClaudeWorker(
         allowDangerouslySkipPermissions: true,
         additionalDirectories: ["/"],
         includePartialMessages: false,
-        env: buildWorkerEnv(),
+        ...(cavemanWorkerExtraArgs ? { extraArgs: cavemanWorkerExtraArgs } : {}),
+        env: { ...buildWorkerEnv(), ...cavemanWorkerEnv },
       },
     });
 

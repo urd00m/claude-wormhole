@@ -22,6 +22,7 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Launch aliases** — define named agent configs in `data/aliases.json` (runtime, model, effort, extra CLI args) and start a thread with `custom_claude ~/code/myrepo <prompt>`.
 - **Text macros** — define shorthand in `data/macros.json`; any whole-token match in a message expands before the agent runs.
 - **Shell passthrough** — a message starting with `!` is run verbatim through `bash -lc` in the thread's workdir (bypasses the agent). `!ls`, `!git status`, etc. 60s timeout, 32 KB output cap.
+- **Caveman compression** — global toggle (`caveman on/off/lite/full/ultra/wenyan`) from any Slack thread. Vendored from [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman); ~65% fewer tokens by replying in terse fragments. Off by default. Applies to all Claude + Codex agents (main + spawn + resident). Wormhole-scoped — your global `~/.claude` / `~/.codex` untouched.
 - **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42` showing context-window fullness (from the SDK's `getContextUsage`), subscription quota (from `/api/oauth/usage` via `scripts/fetch-usage.sh` — needs `jq`), and notional API-equivalent cost.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
@@ -175,6 +176,32 @@ A Slack message that starts with `!` (after any bot mention) is run **verbatim**
 Working directory: the thread's pinned workdir (set via `swd`-style phrases, the `set_workdir` MCP tool, or a launch alias). Falls back to `$HOME` if the thread hasn't pinned one.
 
 Guards: 60s wall-clock timeout (kills the whole process group), 32 KB stdout/stderr cap with a `truncated` marker. No interactivity (stdin is closed) — a command that prompts for input will time out. No agent, no MCP, no consent gate — the trusted Slack user is the only authorization. Use with the same care as a local shell.
+
+### Caveman compression (global Slack toggle)
+
+A vendored copy of [caveman](https://github.com/JuliusBrussee/caveman) — a token-compression skill that makes agent responses terse fragments (~65% fewer tokens). **Off by default**, toggled bot-wide from any Slack thread.
+
+```
+caveman              → on at level full
+caveman on           → same
+caveman lite         → on at level lite
+caveman ultra        → on at level ultra
+caveman wenyan       → on at classical-Chinese level
+caveman off          → back to normal English
+caveman status       → reply with current level
+```
+
+The global level is persisted in `data/cavemanState.json` (gitignored) so it survives restarts. Trust: anyone who can DM the bot can toggle (same as `!cmd`).
+
+**Applies to all Claude agents:**
+- Main thread (`ClaudeRuntime`)
+- One-shot Claude workers via `mcp__spawn__spawn`
+- New resident workers (existing ones keep their startup level — kill + re-spawn to update)
+- Recursive sub-spawning at any depth
+
+**Applies to Codex agents** via a prompt preamble — Codex has no SessionStart hook concept, so the caveman ruleset is prepended to each turn's prompt at `CodexRuntime.send()` time.
+
+**Scoped to the wormhole only.** Caveman's hooks are vendored under `arch-common/caveman/` and pointed to via a wormhole-owned settings file passed to the bundled CLI through the SDK's `extraArgs.settings`. Your global `~/.claude/` and `~/.codex/` are never touched — interactive `claude` / `codex` on your machine behave exactly as before.
 
 ### Sub-agents & resident workers
 

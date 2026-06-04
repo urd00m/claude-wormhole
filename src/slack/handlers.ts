@@ -24,6 +24,8 @@ import { getWorkdirStore, resolveWorkdir } from "../agent/workdirStore.js";
 import { detectBangCommand } from "./bangPrefix.js";
 import { shellExec, formatShellResultForSlack } from "./shellExec.js";
 import os from "node:os";
+import { detectCavemanAction } from "./cavemanMatcher.js";
+import { getCavemanStore } from "../agent/cavemanStore.js";
 import { formatContextFooter } from "./contextIndicator.js";
 import { getUsageStore } from "../usageStore.js";
 import { env } from "../config.js";
@@ -104,6 +106,42 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       channel: msg.channel,
       thread_ts: replyThreadTs,
       text: formatShellResultForSlack(bang.command, result, workdir),
+    });
+    return;
+  }
+
+  // Control phrase: caveman compression toggle. Global (bot-wide) state;
+  // applies to ALL threads on their next message. Existing resident
+  // workers keep their startup level until kill+recreate — we flag any
+  // alive at toggle time. Checked before end-session so `caveman off`
+  // doesn't accidentally hit the end-session matcher.
+  const cavemanAction = detectCavemanAction(msg.text);
+  if (cavemanAction) {
+    inFlight.delete(dedupeKey);
+    const store = getCavemanStore();
+    if (cavemanAction.kind === "status") {
+      const level = store.get();
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: replyThreadTs,
+        text: `Caveman: \`${level}\` (global).`,
+      });
+      return;
+    }
+    const newLevel = cavemanAction.level;
+    store.set(newLevel);
+    const residentCount = getResidentWorkerRegistry().size();
+    const note =
+      residentCount > 0
+        ? ` Note: ${residentCount} existing resident worker(s) will keep their prior level until you kill + re-spawn them.`
+        : "";
+    await client.chat.postMessage({
+      channel: msg.channel,
+      thread_ts: replyThreadTs,
+      text:
+        newLevel === "off"
+          ? `Caveman off (global).${note}`
+          : `Caveman set to \`${newLevel}\` (global). Applies to all threads + new sub-agents on their next message.${note}`,
     });
     return;
   }

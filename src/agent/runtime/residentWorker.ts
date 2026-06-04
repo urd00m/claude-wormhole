@@ -30,6 +30,8 @@ import {
 import { env } from "../../config.js";
 import { SYSTEM_PROMPT } from "../systemPrompt.js";
 import type { QueryFn } from "./claude.js";
+import { getCavemanStore } from "../cavemanStore.js";
+import { ensureCavemanReady } from "../../cavemanLink.js";
 
 /**
  * Push-able async iterable used as the resident query's input channel. The
@@ -135,6 +137,19 @@ export class ResidentWorker {
     this.createdAt = new Date().toISOString();
     this.input = new InputChannel();
 
+    // Caveman is applied at construction time for residents because the
+    // streaming `query()` is opened once and stays alive — we can't swap
+    // `--settings` after that. Toggling caveman after a resident is
+    // already running won't change its behavior; the user must kill and
+    // re-spawn to pick up a new level. That caveat is surfaced when the
+    // user runs `caveman <level>` and we detect existing residents.
+    const cavemanLevel = getCavemanStore().get();
+    const cavemanArt = cavemanLevel === "off" ? null : ensureCavemanReady();
+    const cavemanExtraArgs =
+      cavemanArt && cavemanLevel !== "off" ? { settings: cavemanArt.settingsPath } : undefined;
+    const cavemanEnvAdd =
+      cavemanArt && cavemanLevel !== "off" ? { CAVEMAN_DEFAULT_MODE: cavemanLevel } : {};
+
     const queryFn: QueryFn = opts.queryFn ?? (query as unknown as QueryFn);
     this.q = queryFn({
       prompt: this.input as AsyncIterable<unknown>,
@@ -150,7 +165,8 @@ export class ResidentWorker {
         allowDangerouslySkipPermissions: true,
         additionalDirectories: ["/"],
         includePartialMessages: false,
-        env: buildResidentEnv(),
+        ...(cavemanExtraArgs ? { extraArgs: cavemanExtraArgs } : {}),
+        env: { ...buildResidentEnv(), ...cavemanEnvAdd },
       },
     }) as AsyncGenerator<SDKMessage, void>;
   }

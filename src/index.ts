@@ -8,6 +8,8 @@ import { Scheduler } from "./scheduler/scheduler.js";
 import { makeRunner } from "./scheduler/runner.js";
 import { clearAllOnBoot } from "./slack/activeMarker.js";
 import { ensureCommandsLinked } from "./skillsLink.js";
+import { ensureCavemanReady } from "./cavemanLink.js";
+import { getCavemanStore } from "./agent/cavemanStore.js";
 
 async function main() {
   const auth = detectAuth();
@@ -31,6 +33,24 @@ async function main() {
   } catch (err) {
     console.warn(
       `[boot] ensureCommandsLinked failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Caveman compression — generate the wormhole-owned Claude settings
+  // file and cache the Codex preamble text. Best-effort: failure here
+  // just means the `caveman <level>` Slack control phrase will be a no-op
+  // until the vendored files reappear.
+  try {
+    const art = ensureCavemanReady();
+    if (art) {
+      const level = getCavemanStore().get();
+      console.log(`🪨 caveman: ready (level: ${level}). Toggle from Slack with "caveman on" / "caveman off".`);
+    } else {
+      console.warn("⚠️  caveman: vendored files missing under arch-common/caveman/ — toggle will no-op.");
+    }
+  } catch (err) {
+    console.warn(
+      `[boot] ensureCavemanReady failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 

@@ -63,6 +63,8 @@ import {
   type CodexProcessFactory,
 } from "./codexProcess.js";
 import { codexSpawnMcpFlags } from "./codexSpawnMcp.js";
+import { getCavemanStore } from "../cavemanStore.js";
+import { buildCodexCavemanPreamble, ensureCavemanReady } from "../../cavemanLink.js";
 
 export type CodexRuntimeOpts = {
   threadKey: string;
@@ -314,7 +316,22 @@ export class CodexRuntime implements Runtime {
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     const lastMessageFile = this.lastMessageFileFactory();
-    const prompt = buildPrompt(input);
+    let prompt = buildPrompt(input);
+
+    // Caveman compression — global toggle. Codex has no SessionStart hook
+    // concept, so we inject the ruleset as a prompt preamble at send()
+    // time. Read per-call so the toggle takes effect on the next message
+    // with no restart. When the level is "off" or the vendored caveman
+    // dir is missing, the preamble is empty and the prompt is unchanged.
+    const cavemanLevel = getCavemanStore().get();
+    if (cavemanLevel !== "off") {
+      const art = ensureCavemanReady();
+      if (art) {
+        const preamble = buildCodexCavemanPreamble(cavemanLevel, art.skillText);
+        if (preamble) prompt = preamble + prompt;
+      }
+    }
+
     const sessionIdAtStart = this.sessionId;
 
     // When spawn-MCP is enabled, attach the wormhole spawn server so this

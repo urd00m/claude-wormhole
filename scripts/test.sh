@@ -57,6 +57,9 @@ TESTS=(
   src/agent/tools/spawn.envTimers.test.ts
   src/slack/bangPrefix.test.ts
   src/slack/shellExec.test.ts
+  src/agent/cavemanStore.test.ts
+  src/slack/cavemanMatcher.test.ts
+  src/cavemanLink.test.ts
 )
 
 for t in "${TESTS[@]}"; do

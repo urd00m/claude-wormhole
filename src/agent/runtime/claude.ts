@@ -18,6 +18,8 @@ import {
   SUBAGENT_TOOLS,
 } from "../subagentDepth.js";
 import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, SessionUsage, StreamHooks } from "./types.js";
+import { getCavemanStore } from "../cavemanStore.js";
+import { ensureCavemanReady } from "../../cavemanLink.js";
 
 /**
  * Shape of the SDK's `query` export, minus the parts we don't use. Carved
@@ -246,6 +248,21 @@ export class ClaudeRuntime implements Runtime {
       ? { sessionId: sessionIdAtStart }
       : { resume: sessionIdAtStart };
 
+    // Caveman compression — global toggle. When the level is anything but
+    // "off", we point the bundled CLI at a wormhole-owned settings file
+    // that has the caveman SessionStart hook wired up, AND set
+    // CAVEMAN_DEFAULT_MODE so the hook picks the right level. Both are
+    // read per-`send()` so the toggle takes effect on the very next
+    // message in any thread, no restart.
+    const cavemanLevel = getCavemanStore().get();
+    const cavemanArtifacts = cavemanLevel === "off" ? null : ensureCavemanReady();
+    const cavemanExtraArgs =
+      cavemanArtifacts && cavemanLevel !== "off"
+        ? { settings: cavemanArtifacts.settingsPath }
+        : {};
+    const cavemanEnv =
+      cavemanArtifacts && cavemanLevel !== "off" ? { CAVEMAN_DEFAULT_MODE: cavemanLevel } : {};
+
     const q = this.queryFn({
       prompt,
       options: {
@@ -253,9 +270,14 @@ export class ClaudeRuntime implements Runtime {
         model: this.launch?.model ?? env.ANTHROPIC_MODEL,
         // Alias-supplied reasoning effort (SDK option).
         ...(this.launch?.effort ? { effort: this.launch.effort } : {}),
-        // Alias-supplied raw CLI flags, forwarded to the `claude` process
-        // via the SDK's extraArgs (keys without `--`, null = boolean flag).
-        ...(this.launch?.claudeArgs ? { extraArgs: this.launch.claudeArgs } : {}),
+        // Alias-supplied raw CLI flags PLUS the caveman `--settings`
+        // arg (only when caveman is on) — both forwarded to `claude`
+        // via the SDK's extraArgs.
+        ...((this.launch?.claudeArgs || cavemanArtifacts) && cavemanLevel !== "off"
+          ? { extraArgs: { ...(this.launch?.claudeArgs ?? {}), ...cavemanExtraArgs } }
+          : this.launch?.claudeArgs
+            ? { extraArgs: this.launch.claudeArgs }
+            : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         // AskUserQuestion ships a picker UI in interactive Claude Code, but
@@ -272,7 +294,7 @@ export class ClaudeRuntime implements Runtime {
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         additionalDirectories: ["/"],
-        env: buildChildEnv(),
+        env: { ...buildChildEnv(), ...cavemanEnv },
       },
     });
 
