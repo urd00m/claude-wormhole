@@ -191,7 +191,15 @@ export class ResidentWorker {
    * If the generator ends (process died), mark dead and throw.
    */
   private async readTurn(): Promise<string> {
-    let finalText = "";
+    // Accumulate every assistant text block across the turn. The terminal
+    // `result` message's text is only the FINAL assistant message, so using
+    // it as an override would truncate a long, tool-interleaved report down
+    // to its tail (the same "long messages cut off" bug fixed in
+    // runtime/claude.ts). `result` is therefore a fallback used only when no
+    // assistant text was seen. (A resident worker's spawns run as separate
+    // query() processes, so this stream contains only its own messages.)
+    let assistantText = "";
+    let resultText: string | null = null;
     for (;;) {
       const step = await this.q.next();
       if (step.done) {
@@ -204,12 +212,12 @@ export class ResidentWorker {
           (msg as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content ?? [];
         for (const block of content) {
-          if (block.type === "text" && typeof block.text === "string") finalText = block.text;
+          if (block.type === "text" && typeof block.text === "string") assistantText += block.text;
         }
       } else if (msg.type === "result") {
         const r = msg as { subtype?: string; result?: string };
-        if (r.subtype === "success" && typeof r.result === "string") finalText = r.result;
-        return finalText || "_(no response)_";
+        if (r.subtype === "success" && typeof r.result === "string") resultText = r.result;
+        return (assistantText.length > 0 ? assistantText : resultText ?? "") || "_(no response)_";
       }
     }
   }

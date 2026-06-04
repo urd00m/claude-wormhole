@@ -6,7 +6,7 @@
 import { buildClaudeMcpServer } from "./claudeMcp.js";
 import { slackToolDefs, type SlackContext } from "./slackPostDef.js";
 
-export { postSlackMessage, type SlackContext } from "./slackPostDef.js";
+export { postSlackMessage, deleteSlackMessages, type SlackContext } from "./slackPostDef.js";
 
 /**
  * Build the Claude SDK MCP server scoped to a single Slack thread so the

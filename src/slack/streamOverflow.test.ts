@@ -137,11 +137,87 @@ async function testFinalizeWaitsForInFlightFlushAndCapturesLatestSetText() {
   );
 }
 
+// Regression: the streamer EDITS its messages with chat.update, which Slack
+// caps at ~4,000 chars and REJECTS ("msg_too_long") above that — far below
+// chat.postMessage's 40k. The real "long messages cut off" bug was the part
+// cap (38k) sitting 9.5x over the update limit: once a reply passed ~4k every
+// chat.update was rejected, the error swallowed, and the message froze at its
+// last small successful state. Simulate the 4k update limit and assert the
+// streamer keeps every edit under it while still delivering the whole reply.
+async function testStreamerRespectsChatUpdateLimit() {
+  const UPDATE_LIMIT = 4000;
+  const oversized: number[] = [];
+  const texts = new Map<string, string>(); // ts -> latest text on that message
+  const client = {
+    chat: {
+      postMessage: async ({ text }: { text: string }) => {
+        const ts = `p${texts.size + 1}`;
+        texts.set(ts, text);
+        return { ts };
+      },
+      update: async ({ ts, text }: { ts: string; text: string }) => {
+        if (text.length > UPDATE_LIMIT) {
+          oversized.push(text.length);
+          throw new Error("An API error occurred: msg_too_long");
+        }
+        texts.set(ts, text);
+        return { ok: true };
+      },
+    },
+  } as never;
+
+  const s = new SlackStreamer(client, "C1", "T1");
+  await s.open();
+  const huge = "HEAD_MARKER\n\n" + "Detailed paragraph about a file.\n\n".repeat(800) + "TAIL_MARKER";
+  s.setText(huge);
+  await s.finalize();
+
+  assert(
+    oversized.length === 0,
+    `chat.update called with >${UPDATE_LIMIT} chars ${oversized.length}x (e.g. ${oversized.slice(0, 3)}) — would be rejected, freezing the message`,
+  );
+  for (const [ts, text] of texts) {
+    assert(text.length <= UPDATE_LIMIT, `${ts} exceeds chat.update limit: ${text.length}`);
+  }
+  const all = [...texts.values()].join("\n");
+  assert(all.includes("HEAD_MARKER"), "head of long reply dropped");
+  assert(all.includes("TAIL_MARKER"), "tail of long reply dropped — still cut off");
+}
+
+// The splitter must break at word boundaries, not mid-word, when a long run
+// has no line breaks within the size cap (the "…banner l" | "ines…" ugliness).
+// It still hard-cuts a single unbroken token longer than the back half of the
+// window, losslessly.
+async function testSplitterWordBoundary() {
+  // (1) Long single line, no newlines → must fall back to spaces, never slice
+  // a word. Distinct tokens let us detect any mid-word cut on rejoin.
+  const words = Array.from({ length: 5000 }, (_, i) => `w${i}`);
+  const parts = splitForSlack(words.join(" "), 200);
+  assert(parts.length >= 2, `expected split, got ${parts.length}`);
+  const rejoined = parts.join(" ").split(/\s+/).filter(Boolean);
+  assert(
+    rejoined.length === words.length,
+    `word count changed (mid-word cut?): ${rejoined.length} vs ${words.length}`,
+  );
+  for (let i = 0; i < words.length; i++) {
+    assert(rejoined[i] === words[i], `word ${i} corrupted at a boundary: "${rejoined[i]}" vs "${words[i]}"`);
+  }
+
+  // (2) A single unbroken token longer than the cap must still hard-cut, and
+  // do so losslessly (no chars dropped, since there's no separator to drop).
+  const blob = "z".repeat(900);
+  const bp = splitForSlack(blob, 200);
+  assert(bp.length >= 5, `unbroken token must still split, got ${bp.length}`);
+  assert(bp.join("") === blob, "hard cut of an unbroken token must be lossless");
+}
+
 async function main() {
+  await testSplitterWordBoundary();
   await testSplitterPlain();
   await testSplitterPreservesCodeFence();
   await testStreamerSpansMessages();
   await testFinalizeWaitsForInFlightFlushAndCapturesLatestSetText();
+  await testStreamerRespectsChatUpdateLimit();
   console.log("✅ stream overflow verification passed");
 }
 

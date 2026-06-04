@@ -440,18 +440,66 @@ async function main() {
     assert(finals.length === 1 && finals[0] === "_(no response)_", "onFinal fires with sentinel");
   }
 
-  // --- (15) `result` subtype=success overrides final text ---------------
-  // The SDK's terminal `result` message is the authoritative final text and
-  // beats whatever the last assistant text block was.
+  // --- (15) `result` text is a FALLBACK, not an override ----------------
+  // The terminal `result` message's `result` is only the FINAL assistant
+  // message's text. When the turn DID surface assistant text blocks, the
+  // accumulated assistant text is authoritative — `result` must NOT overwrite
+  // it, or a tool-interleaved reply lands truncated to its tail (the "long
+  // messages cut off" bug). A divergent `result` string here proves the
+  // assistant text wins.
   {
     const rt = buildRuntime([
-      mkAssistant({ text: "partial" }),
-      { type: "result", subtype: "success", result: "AUTHORITATIVE" } as unknown as SDKMessage,
+      mkAssistant({ text: "the full assistant answer" }),
+      { type: "result", subtype: "success", result: "tail only" } as unknown as SDKMessage,
     ]);
     const finals: string[] = [];
     const out = await rt.send({ text: "hi" }, { onFinal: (t) => finals.push(t) });
-    assert(out.finalText === "AUTHORITATIVE", `result.result must win, got: ${out.finalText}`);
-    assert(finals[0] === "AUTHORITATIVE", "onFinal sees the authoritative text");
+    assert(out.finalText === "the full assistant answer", `assistant text must win, got: ${out.finalText}`);
+    assert(finals[0] === "the full assistant answer", "onFinal sees the accumulated assistant text");
+  }
+
+  // --- (15a) `result` is used when the turn surfaced no assistant text ---
+  // Some turns yield only a result message (no assistant text block). Then
+  // the result string is all we have and must be used.
+  {
+    const rt = buildRuntime([
+      { type: "result", subtype: "success", result: "FROM_RESULT" } as unknown as SDKMessage,
+    ]);
+    const finals: string[] = [];
+    const out = await rt.send({ text: "hi" }, { onFinal: (t) => finals.push(t) });
+    assert(out.finalText === "FROM_RESULT", `result fallback, got: ${out.finalText}`);
+    assert(finals[0] === "FROM_RESULT", "onFinal sees the result fallback");
+  }
+
+  // --- (15b) Regression: long reply broken up by a tool call is NOT cut off
+  // A turn is many assistant messages (text → tool_use → text). Every segment
+  // streams via onText (the user watches the whole thing build up), but the
+  // SDK's `result` carries only the FINAL segment. The runtime must hand
+  // onFinal the FULL concatenation — equal to the streamed buffer — so the
+  // streamer's setText doesn't shrink the message back down to the tail.
+  {
+    const rec = await run([
+      mkStreamEventText("INTRO before the tool call. "),
+      mkAssistant({ text: "INTRO before the tool call. " }),
+      mkAssistant({ toolUses: [{ id: "tu_x", name: "Bash", input: { command: "ls" } }] }),
+      mkUserToolResult({ toolUseId: "tu_x" }),
+      mkStreamEventText("CONCLUSION after the tool call."),
+      mkAssistant({ text: "CONCLUSION after the tool call." }),
+      // result mirrors only the last assistant message's text (the tail).
+      { type: "result", subtype: "success", result: "CONCLUSION after the tool call." } as unknown as SDKMessage,
+    ]);
+    assert(rec.finals.length === 1, `one final, got ${rec.finals.length}`);
+    const final = rec.finals[0];
+    const streamed = rec.text.join("");
+    assert(final.includes("INTRO"), `pre-tool text dropped from final: ${final}`);
+    assert(final.includes("CONCLUSION"), `post-tool text missing from final: ${final}`);
+    assert(
+      final === "INTRO before the tool call. CONCLUSION after the tool call.",
+      `final must be the full reply, got: ${final}`,
+    );
+    // The canonical final must equal what was streamed, so setText doesn't
+    // visibly shrink the message when finalize() runs.
+    assert(final === streamed, `final must match streamed buffer:\n  final=${final}\n  streamed=${streamed}`);
   }
 
   // --- (16) setMcpServers / setCanUseTool are pass-throughs (build only)

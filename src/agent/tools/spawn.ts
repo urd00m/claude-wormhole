@@ -109,7 +109,12 @@ export async function runClaudeWorker(
   prompt: string,
   workerMcpServers: Record<string, McpSdkServerConfigWithInstance>,
 ): Promise<WorkerOutcome> {
+  // Accumulate all main-agent assistant text blocks; the terminal `result`
+  // text is only the final message, so it serves as a fallback rather than
+  // overwriting earlier segments — otherwise a long, tool-interleaved worker
+  // report is truncated to its tail (see runtime/claude.ts for the bug).
   let finalText = "";
+  let resultText: string | null = null;
   let outcome: "completed" | "failed" = "completed";
   try {
     const workerQ = query({
@@ -134,7 +139,7 @@ export async function runClaudeWorker(
       if (msg.type === "result") {
         const r = msg as { subtype?: string; result?: string };
         if (r.subtype === "success" && typeof r.result === "string") {
-          finalText = r.result;
+          resultText = r.result;
         }
       } else if (msg.type === "assistant") {
         const m = msg as {
@@ -145,11 +150,14 @@ export async function runClaudeWorker(
         const content = (m.message?.content ?? []) as Array<{ type?: string; text?: string }>;
         for (const block of content) {
           if (block.type === "text" && typeof block.text === "string") {
-            finalText = block.text;
+            finalText += block.text;
           }
         }
       }
     }
+    // Prefer the accumulated assistant text; fall back to the result text
+    // only when the worker surfaced no assistant text blocks.
+    if (finalText.length === 0 && resultText != null) finalText = resultText;
   } catch (err) {
     outcome = "failed";
     finalText = err instanceof Error ? err.message : String(err);

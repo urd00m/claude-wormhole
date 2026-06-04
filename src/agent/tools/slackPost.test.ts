@@ -24,7 +24,7 @@ function makeClient(posts: Post[]): WebClient {
 
 async function testShortMessageStaysOne() {
   const posts: Post[] = [];
-  const n = await postSlackMessage(makeClient(posts), "C1", "T1", "hello world");
+  const n = (await postSlackMessage(makeClient(posts), "C1", "T1", "hello world")).length;
   assert(n === 1, `short message should be 1 part, got ${n}`);
   assert(posts.length === 1, `expected 1 post, got ${posts.length}`);
   assert(posts[0].text === "hello world", "text passed through unchanged");
@@ -38,7 +38,7 @@ async function testLongMessageSplitsAndPreservesContent() {
   const tail = "TAIL_MARKER";
   const huge = head + body + tail;
 
-  const n = await postSlackMessage(makeClient(posts), "C1", "T1", huge);
+  const n = (await postSlackMessage(makeClient(posts), "C1", "T1", huge)).length;
   assert(n >= 2, `expected ≥2 parts, got ${n}`);
   assert(posts.length === n, `posts (${posts.length}) should match parts (${n})`);
 
@@ -57,7 +57,7 @@ async function testLongCodeBlockKeepsFencesBalanced() {
   const prose = "Here is some output:\n\n";
   const code = "```ts\n" + "x".repeat(80_000) + "\n```\n";
   const tail = "\n\nDone.";
-  const n = await postSlackMessage(makeClient(posts), "C1", "T1", prose + code + tail);
+  const n = (await postSlackMessage(makeClient(posts), "C1", "T1", prose + code + tail)).length;
 
   assert(n >= 2, `expected split, got ${n} parts`);
   for (const p of posts) {

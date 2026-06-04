@@ -3,10 +3,21 @@ import { toMrkdwn } from "./formatter.js";
 
 const MIN_EDIT_INTERVAL_MS = 1000;
 const PLACEHOLDER = "_thinking…_";
-// Slack's chat.update text field caps at 40,000 chars. Stay well under to
-// leave headroom for the tools-status line, any continuation hint, and
-// fence-rebalancing fences we may inject when splitting.
-const MAX_PART_CHARS = 38000;
+// CRITICAL: Slack's two write methods have very different `text` limits:
+//   - chat.postMessage accepts up to 40,000 chars (truncates above that).
+//   - chat.update accepts only ~4,000 chars and ERRORS ("msg_too_long")
+//     above it — verified empirically against the live API.
+// The streamer EDITS its messages with chat.update on every flush (the first
+// message and every continuation), so EVERY part must stay under the 4k
+// update limit, not the 40k post limit. Using 38k here was the real
+// "long messages get cut off" bug: once a reply passed ~4k, every chat.update
+// was rejected, the error was swallowed, and the message froze at its last
+// successful sub-4k state. Cap at 3,800 to leave headroom for the
+// tools-status line and the ```fence``` reopen prefix/suffix splitForSlack
+// injects across boundaries (≈30 chars), keeping each part safely < 4,000.
+// (postSlackMessage / the slack_post_message MCP tool use chat.postMessage,
+// so their separate 38k cap is correct and stays as-is.)
+const MAX_PART_CHARS = 3800;
 
 type ToolStatus = "running" | "ok" | "err";
 type ToolCall = { id: string; name: string; status: ToolStatus };
@@ -254,7 +265,11 @@ export class SlackStreamer {
  * boundaries. If we cut while inside a fenced code block, we close the fence
  * at the end of the chunk and reopen it at the start of the next.
  *
- * Boundary preference: blank line > newline > hard cut.
+ * Boundary preference: blank line > newline > word boundary (space) > hard
+ * cut. The word-boundary step keeps the splitter from slicing through the
+ * middle of a word at the size cap (e.g. "…banner l" | "ines…"); it only
+ * falls back to a mid-token hard cut when there's no space in the back half
+ * of the window (a single unbroken run longer than maxChars/2).
  */
 export function splitForSlack(text: string, maxChars: number): string[] {
   if (text.length <= maxChars) return [text];
@@ -265,12 +280,32 @@ export function splitForSlack(text: string, maxChars: number): string[] {
 
   while (remaining.length > maxChars) {
     const window = remaining.slice(0, maxChars);
+    const half = Math.floor(maxChars / 2);
+    // "nl" = cut at a line break (blank line or newline); "space" = cut at a
+    // word boundary; "hard" = mid-token cut (last resort). The kind decides
+    // which leading separator to drop from the continuation below.
     let cut = window.lastIndexOf("\n\n");
-    if (cut < Math.floor(maxChars / 2)) cut = window.lastIndexOf("\n");
-    if (cut < Math.floor(maxChars / 2)) cut = maxChars;
+    let cutKind: "nl" | "space" | "hard" = "nl";
+    if (cut < half) cut = window.lastIndexOf("\n");
+    if (cut < half) {
+      const sp = window.lastIndexOf(" ");
+      if (sp >= half) {
+        cut = sp;
+        cutKind = "space";
+      } else {
+        cut = maxChars;
+        cutKind = "hard";
+      }
+    }
 
-    let chunk = remaining.slice(0, cut);
-    const rest = remaining.slice(cut).replace(/^\n+/, "");
+    const chunk = remaining.slice(0, cut);
+    // Drop the boundary separator so it doesn't surface as leading whitespace
+    // on the next chunk: line breaks for an "nl" cut, the single space for a
+    // word break. A hard mid-token cut keeps every character (lossless).
+    const rest =
+      cutKind === "space"
+        ? remaining.slice(cut).replace(/^ +/, "")
+        : remaining.slice(cut).replace(/^\n+/, "");
 
     let chunkPrefix = "";
     if (openFenceLang) chunkPrefix = "```" + openFenceLang + "\n";

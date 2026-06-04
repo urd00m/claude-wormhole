@@ -276,7 +276,23 @@ export class ClaudeRuntime implements Runtime {
       },
     });
 
+    // Accumulate EVERY main-agent assistant text block across the turn. A
+    // single turn is many assistant messages (text → tool_use → text → …),
+    // and the streamed `onText` deltas already concatenate all of them. The
+    // old code did `finalText = block.text` (last block only) and then let
+    // the `result` message overwrite with `r.result` — which is itself only
+    // the FINAL assistant message's text. So when a long reply was broken up
+    // by tool calls, `onFinal` handed Slack just the tail and `setText`
+    // shrank the fully-streamed message down to it: the "long messages cut
+    // off" bug. Accumulating mirrors the streamed buffer exactly (sum of all
+    // text blocks == sum of all text deltas), so the canonical final text is
+    // the complete reply.
     let finalText = "";
+    // The terminal `result` message's text — only the last assistant
+    // message. Used solely as a FALLBACK when the turn surfaced no assistant
+    // text blocks at all (e.g. a result-only stream), never to overwrite the
+    // accumulated text. See claude.test.ts cases (14)/(15)/(15b).
+    let resultText: string | null = null;
     const seenToolStarts = new Set<string>();
     // Per-turn usage, captured from the terminal result message and folded
     // into the cumulative session totals after the stream drains.
@@ -328,7 +344,7 @@ export class ClaudeRuntime implements Runtime {
           const content = msg.message?.content ?? [];
           for (const block of content) {
             if (block.type === "text") {
-              finalText = block.text;
+              finalText += block.text;
             } else if (block.type === "tool_use") {
               if (!seenToolStarts.has(block.id)) {
                 seenToolStarts.add(block.id);
@@ -375,7 +391,7 @@ export class ClaudeRuntime implements Runtime {
             modelUsage?: Record<string, { contextWindow?: number }>;
           };
           if (r.subtype === "success" && typeof r.result === "string") {
-            finalText = r.result;
+            resultText = r.result;
           }
           // total_cost_usd is this query's cost (SDK-computed from
           // per-model API rates); summing across sends gives cumulative
@@ -537,7 +553,10 @@ export class ClaudeRuntime implements Runtime {
       this.contextTokens = turnInputTokens;
       this.peakContextTokens = Math.max(this.peakContextTokens, turnInputTokens);
     }
-    const out = finalText || "_(no response)_";
+    // Prefer the accumulated assistant text (the full turn). Only fall back
+    // to the result message's text when no assistant text blocks were seen,
+    // so we never re-truncate a tool-interleaved reply down to its tail.
+    const out = (finalText.length > 0 ? finalText : resultText ?? "") || "_(no response)_";
     hooks.onFinal?.(out);
     return { finalText: out };
   }
