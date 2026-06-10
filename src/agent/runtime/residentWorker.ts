@@ -30,6 +30,7 @@ import {
 import { env } from "../../config.js";
 import { SYSTEM_PROMPT } from "../systemPrompt.js";
 import type { QueryFn } from "./claude.js";
+import type { EffortLevel } from "./types.js";
 import { getCavemanStore } from "../cavemanStore.js";
 import { ensureCavemanReady } from "../../cavemanLink.js";
 
@@ -92,6 +93,11 @@ export type ResidentWorkerOpts = {
   name: string;
   ownerThread: string;
   workdir: string;
+  /** Model override — applied at creation only (the streaming query() is
+   * opened once with fixed options; see the caveman comment in the ctor). */
+  model?: string;
+  /** Reasoning effort (SDK `effort` option) — creation-only, like model. */
+  effort?: EffortLevel;
   canUseTool?: CanUseTool;
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
   /** Test seam — defaults to the real SDK query. */
@@ -155,7 +161,8 @@ export class ResidentWorker {
       prompt: this.input as AsyncIterable<unknown>,
       options: {
         cwd: opts.workdir,
-        model: env.ANTHROPIC_MODEL,
+        model: opts.model ?? env.ANTHROPIC_MODEL,
+        ...(opts.effort ? { effort: opts.effort } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         disallowedTools: ["AskUserQuestion"],

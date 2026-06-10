@@ -14,6 +14,8 @@ import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
 import type { TaskEvent } from "../session.js";
 import { CodexRuntime } from "../runtime/codex.js";
 import type { CodexProcessFactory } from "../runtime/codexProcess.js";
+import type { EffortLevel } from "../runtime/types.js";
+import type { QueryFn } from "../runtime/claude.js";
 import { getResidentWorkerRegistry, type ResidentWorkerRegistry } from "../residentWorkerRegistry.js";
 import { getCavemanStore } from "../cavemanStore.js";
 import { ensureCavemanReady } from "../../cavemanLink.js";
@@ -23,6 +25,15 @@ export type SpawnToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
 };
+
+/**
+ * Per-call launch overrides for a spawned worker. Runtime-neutral, same
+ * spirit as the alias layer's AgentLaunchConfig (runtime/types.ts):
+ * Claude applies model/effort as SDK options; Codex maps them to
+ * `-m <model>` / `-c model_reasoning_effort=<level>`. An effort level a
+ * runtime doesn't support is that runtime's problem, not ours.
+ */
+export type WorkerLaunch = { model?: string; effort?: EffortLevel };
 
 /**
  * Context for one level of the spawn-MCP hierarchy. `depth` is THIS MCP's
@@ -63,6 +74,12 @@ export type SpawnCtx = {
    * factory to exercise the resident tool handlers without real Claude.
    */
   residentRegistry?: ResidentWorkerRegistry;
+  /**
+   * Test seam — overrides the SDK `query` used for one-shot Claude
+   * workers. Production omits this (real `query` opens a CLI subprocess,
+   * not viable in unit tests). Same pattern as ClaudeRuntime.queryFn.
+   */
+  claudeQueryFn?: QueryFn;
 };
 
 /**
@@ -110,6 +127,7 @@ export async function runClaudeWorker(
   ctx: SpawnCtx,
   prompt: string,
   workerMcpServers: Record<string, McpSdkServerConfigWithInstance>,
+  launch: WorkerLaunch = {},
 ): Promise<WorkerOutcome> {
   // Accumulate all main-agent assistant text blocks; the terminal `result`
   // text is only the final message, so it serves as a fallback rather than
@@ -128,11 +146,14 @@ export async function runClaudeWorker(
   const cavemanWorkerEnv =
     cavemanArt && cavemanLevel !== "off" ? { CAVEMAN_DEFAULT_MODE: cavemanLevel } : {};
   try {
-    const workerQ = query({
+    const queryFn: QueryFn = ctx.claudeQueryFn ?? (query as unknown as QueryFn);
+    const workerQ = queryFn({
       prompt,
       options: {
         cwd: ctx.workdir,
-        model: env.ANTHROPIC_MODEL,
+        model: launch.model ?? env.ANTHROPIC_MODEL,
+        // Per-call reasoning effort (SDK option) — mirrors runtime/claude.ts.
+        ...(launch.effort ? { effort: launch.effort } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: SYSTEM_PROMPT },
         tools: { type: "preset", preset: "claude_code" },
         disallowedTools: ["AskUserQuestion"],
@@ -199,11 +220,15 @@ export async function runClaudeWorker(
 export async function runCodexWorker(
   ctx: SpawnCtx,
   prompt: string,
+  launch: WorkerLaunch = {},
 ): Promise<WorkerOutcome> {
   try {
     const rt = new CodexRuntime({
       threadKey: `spawn-${randomUUID()}`,
       workdir: ctx.workdir,
+      // Per-call model/effort overrides — CodexRuntime maps these to
+      // `-m <model>` / `-c model_reasoning_effort=<level>`.
+      launch,
       // Give the codex worker the spawn MCP so it can launch further agents
       // instead of being one-shot. It runs at this spawn level's depth;
       // its children spawn at depth+1, bounded by the cap in the server.
@@ -226,7 +251,7 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
 
   const spawnTool = tool(
     "spawn",
-    `Spawn a worker sub-agent for parallel or context-isolated work. This is the ONLY sub-agent dispatch path in this harness — native Agent/Task tool calls are denied at the canUseTool gate and redirected here. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Set runtime: "codex" to dispatch the worker to the OpenAI Codex CLI instead of Claude — useful for second opinions or Codex-specific behavior; Codex workers see no MCP tools and cannot recursively spawn. Current spawn-MCP depth: ${myDepth}.`,
+    `Spawn a worker sub-agent for parallel or context-isolated work. This is the ONLY sub-agent dispatch path in this harness — native Agent/Task tool calls are denied at the canUseTool gate and redirected here. The worker has the full Claude Code tool surface AND this spawn tool itself, so deep orchestration patterns (Planner / Plan-critic / Executor / Verifier / Verdict-critic) work to depth ${MAX_SUBAGENT_DEPTH}. Multiple spawn calls in one assistant turn run in parallel. Set background: true (or run_in_background: true) for fire-and-forget — the call returns immediately with a dispatch ack and the worker's completion is posted to the Slack thread later via a task-notification event. Set runtime: "codex" to dispatch the worker to the OpenAI Codex CLI instead of Claude — useful for second opinions or Codex-specific behavior; Codex workers see no MCP tools and cannot recursively spawn. Per-call \`model\` and \`effort\` (low|medium|high|xhigh|max) tune the worker's model and reasoning effort. Current spawn-MCP depth: ${myDepth}.`,
     {
       prompt: z
         .string()
@@ -247,6 +272,14 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
         .enum(["claude", "codex"])
         .optional()
         .describe("Which runtime to launch the worker under. 'claude' (default) gets the full Claude Code tool surface and can recursively spawn. 'codex' dispatches to the codex CLI subprocess and returns its final text — Codex workers see no MCP tools and can't spawn further workers, so reach for it when you want a second opinion or Codex-specific capability, not when you need recursive orchestration."),
+      model: z
+        .string()
+        .optional()
+        .describe("Model override for this worker (e.g. a claude-* id for Claude workers, gpt-* for Codex workers). Default: the harness's configured model. For resident workers, applied at creation only — later spawns to the same name ignore it."),
+      effort: z
+        .enum(["low", "medium", "high", "xhigh", "max"])
+        .optional()
+        .describe("Reasoning effort for this worker. Claude honors all five levels (SDK `effort` option); Codex maps it to `-c model_reasoning_effort` (low/medium/high are the portable subset). Not inherited by the worker's own child spawns. For resident workers, applied at creation only."),
       name: z
         .string()
         .optional()
@@ -256,13 +289,14 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
         .optional()
         .describe("Set true (with `name`) to make the worker resident — a process kept alive across invocations, holding its own conversation context in memory. Default false = the normal one-shot worker (runs once, exits). Resident workers are Claude-only for now and ignore the background/runtime flags."),
     },
-    async ({ prompt, description, background, run_in_background, runtime, name, resident }) => {
+    async ({ prompt, description, background, run_in_background, runtime, model, effort, name, resident }) => {
+      const launch: WorkerLaunch = { model, effort };
       // --- Resident worker path -------------------------------------------
       // A named, long-lived process that retains in-memory context across
       // invocations. Routed entirely through the registry; the one-shot
       // background/runtime machinery below does not apply.
       if (resident === true) {
-        return handleResidentSpawn(ctx, { prompt, name }, ctx.residentRegistry ?? getResidentWorkerRegistry());
+        return handleResidentSpawn(ctx, { prompt, name, ...launch }, ctx.residentRegistry ?? getResidentWorkerRegistry());
       }
 
       const workerRuntime: "claude" | "codex" = runtime ?? "claude";
@@ -312,8 +346,8 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
 
       const runWorker = async (): Promise<WorkerOutcome> =>
         workerRuntime === "codex"
-          ? runCodexWorker(ctx, prompt)
-          : runClaudeWorker(ctx, prompt, buildClaudeWorkerMcp());
+          ? runCodexWorker(ctx, prompt, launch)
+          : runClaudeWorker(ctx, prompt, buildClaudeWorkerMcp(), launch);
 
       if (!isBackground) {
         // Synchronous path: block on the worker.
@@ -395,7 +429,7 @@ export function buildSpawnMcp(ctx: SpawnCtx): McpSdkServerConfigWithInstance {
  */
 export async function handleResidentSpawn(
   ctx: SpawnCtx,
-  args: { prompt: string; name?: string },
+  args: { prompt: string; name?: string } & WorkerLaunch,
   registry: ResidentWorkerRegistry,
 ): Promise<SpawnToolResult> {
   if (!args.name || args.name.trim().length === 0) {
@@ -421,10 +455,15 @@ export async function handleResidentSpawn(
     };
   }
 
+  // model/effort take effect only when this call CREATES the worker — the
+  // streaming query() is opened once with fixed options, so a later spawn
+  // to the same warm worker can't change them (matches the caveman caveat).
   const worker = registry.getOrCreate({
     name: args.name,
     ownerThread: ctx.threadKey,
     workdir: ctx.workdir,
+    model: args.model,
+    effort: args.effort,
     canUseTool: ctx.buildCanUseTool(),
     mcpServers: { slack: ctx.buildSlackMcp() },
   });

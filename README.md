@@ -206,6 +206,7 @@ The global level is persisted in `data/cavemanState.json` (gitignored) so it sur
 ### Sub-agents & resident workers
 
 - **One-shot spawn:** the agent calls `mcp__spawn__spawn` to run a worker (sync or `background: true`) that reports back. `runtime: "codex"` dispatches the worker to Codex instead of Claude.
+- **Per-call `model` + `effort`:** the spawn tool takes optional `model` and `effort` (`low|medium|high|xhigh|max`) overrides — Claude applies them as SDK options, Codex maps them to `-m` / `-c model_reasoning_effort`. Not inherited by child spawns; for resident workers they apply at creation only (the warm process's options are fixed).
 - **Resident workers (Claude):** `mcp__spawn__spawn` with `name` + `resident: true` launches a long-lived process that stays warm across calls, keeping its context in memory (no resume). Same name → same worker. `worker_list` and `worker_kill` manage them; `end session` kills a thread's workers.
 - **Codex can spawn too:** a Codex worker gets its own `spawn` tool (via a stdio MCP server), so it's no longer one-shot — `codex→codex` recurses (depth-capped) and `codex→claude` delegates to a Claude leaf.
 

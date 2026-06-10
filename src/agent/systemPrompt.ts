@@ -21,6 +21,12 @@ Calling spawn:
     with a dispatch ack, and worker completion is posted as a task
     notification in the Slack thread later. Default false = block and
     return the worker's final text as the tool result.
+  model: optional model override for the worker (claude-* id for Claude
+    workers, gpt-* for Codex workers). Default: the harness model.
+  effort: optional reasoning effort — low | medium | high | xhigh | max.
+    Claude honors all five; Codex maps it to model_reasoning_effort
+    (low/medium/high portable). Not inherited by the worker's own child
+    spawns; for resident workers, applied at creation only.
 
 Multiple spawn calls in one assistant turn run in parallel — emit them as
 parallel tool_use blocks for fan-out work. Recursive depth is capped at 10.

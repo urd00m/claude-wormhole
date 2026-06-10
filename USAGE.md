@@ -107,7 +107,7 @@ Other formats: ask for a flowchart, ER diagram, state diagram, Gantt chart, etc.
 
 ## Sub-agents (the `Task` tool)
 
-The agent can spawn sub-agents for work it wants to delegate. You don't have to do anything special — just ask for things that benefit from parallelism or isolated context.
+The agent can spawn sub-agents for work it wants to delegate. You don't have to do anything special — just ask for things that benefit from parallelism or isolated context. Each spawn can carry its own `model` and `effort` (`low|medium|high|xhigh|max`) override — ask for "a high-effort verifier" or "a cheap haiku worker per file" and the agent passes them per-call.
 
 ```
 You:   audit each TypeScript file in src/ for any TODO comments and summarize the categories
