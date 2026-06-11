@@ -27,6 +27,7 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
 - **Interrupt a running turn** — send `ctrl+c` (or `^c`, `interrupt`) in a thread to stop whatever the agent is currently doing, like ctrl+c in a terminal. Partial output stays; the session and its conversation survive — the next message continues where things stood. Works in both runtimes (Claude via the SDK's interrupt control request, Codex by terminating its subprocess).
+- **Auto-wake on background-task completion** — when a background worker (`mcp__spawn__spawn` with `background: true`) or a `run_in_background` Bash finishes *after* the turn that spawned it already ended, the agent is re-invoked with the completion instead of sitting idle until the next human message. Guarded: no wake while a turn is in flight (the SDK delivers into the live turn), and at most one wake per task.
 - **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately. The next message in that thread starts fresh.
 
 ---
@@ -283,7 +284,10 @@ src/
 │   ├── download.ts       # ingest Slack file attachments
 │   ├── upload.ts         # files.uploadV2 wrapper
 │   ├── consent.ts        # destructive-command approval flow
-│   └── interactions.ts   # block_actions handler for buttons
+│   ├── interactions.ts   # block_actions handler for buttons
+│   ├── interruptMatcher.ts # "ctrl+c"/"interrupt" control-phrase detector
+│   ├── taskEvents.ts     # background-task lifecycle → Slack posts
+│   └── completionWake.ts # re-invoke idle agent on background-task completion
 ├── agent/
 │   ├── manager.ts          # Map<threadKey, Session> + per-thread queue + runtime selection
 │   ├── session.ts          # Runtime-agnostic wrapper; holds one Runtime instance
