@@ -14,6 +14,7 @@ import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
 import { markActive, unmarkActive } from "./activeMarker.js";
 import { isEndSessionPhrase } from "./endSessionMatcher.js";
+import { isInterruptPhrase } from "./interruptMatcher.js";
 import { detectRuntimeSwitch } from "./runtimeMatcher.js";
 import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
@@ -106,6 +107,34 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       channel: msg.channel,
       thread_ts: replyThreadTs,
       text: formatShellResultForSlack(bang.command, result, workdir),
+    });
+    return;
+  }
+
+  // Control phrase: "ctrl+c" — interrupt the thread's in-flight turn, like
+  // ctrl+c in a terminal. Deliberately BYPASSES the per-thread queue (an
+  // enqueued interrupt would only run AFTER the very turn it's meant to
+  // stop) and uses sessions.peek so it never creates a session. The
+  // interrupted turn settles through its normal path: partial text stays
+  // in the streamed message, and its heartbeat/streamer cleanup still runs.
+  if (isInterruptPhrase(msg.text)) {
+    inFlight.delete(dedupeKey);
+    const entry = sessions.peek(key);
+    if (!entry || !entry.busy) {
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: replyThreadTs,
+        text: "Nothing is running in this thread — nothing to interrupt.",
+      });
+      return;
+    }
+    const sent = await entry.session.interrupt();
+    await client.chat.postMessage({
+      channel: msg.channel,
+      thread_ts: replyThreadTs,
+      text: sent
+        ? ":octagonal_sign: Interrupt sent — stopping the current action."
+        : "Couldn't interrupt — the turn may already be finishing. If it's stuck, `end session` tears it down.",
     });
     return;
   }

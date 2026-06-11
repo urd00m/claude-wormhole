@@ -290,6 +290,18 @@ export class CodexRuntime implements Runtime {
   private readonly spawnDepth: number;
   private readonly processFactory: CodexProcessFactory;
   private readonly lastMessageFileFactory: () => string;
+  /**
+   * The subprocess for the in-flight send(), if any — the interrupt target.
+   * Codex has no graceful mid-turn control channel, so interrupt = kill.
+   * Cleared in send()'s finally (per-thread sends are serialized).
+   */
+  private activeProc: CodexProcess | null = null;
+  /**
+   * Set by interrupt() right before killing the subprocess, so send() can
+   * tell a user-requested stop apart from a real crash and settle
+   * gracefully instead of throwing.
+   */
+  private interruptRequested = false;
 
   constructor(opts: CodexRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -312,6 +324,21 @@ export class CodexRuntime implements Runtime {
 
   resetConversation(): void {
     this.sessionId = null;
+  }
+
+  /**
+   * Interrupt the in-flight turn by killing the `codex exec` subprocess.
+   * Returns false when nothing is running. Safe for conversation state:
+   * a first-turn session UUID is only pinned on SUCCESS, and resumed
+   * sessions keep their already-persisted rollout — so the next message
+   * resumes (or restarts) cleanly.
+   */
+  async interrupt(): Promise<boolean> {
+    const proc = this.activeProc;
+    if (!proc) return false;
+    this.interruptRequested = true;
+    proc.kill("SIGTERM");
+    return true;
   }
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
@@ -357,6 +384,10 @@ export class CodexRuntime implements Runtime {
       cwd: this.workdir,
       env: { ...buildCodexEnv(), ...spawn.env },
     });
+    this.activeProc = proc;
+    // A stale flag could survive a prior turn whose process exited in the
+    // same tick the interrupt landed; never let it misclassify THIS turn.
+    this.interruptRequested = false;
 
     let observedSessionId: string | null = null;
     // Errors come on stdout as `error` / `turn.failed` events, not on
@@ -382,6 +413,15 @@ export class CodexRuntime implements Runtime {
 
       const exitCode = await proc.wait();
       if (exitCode !== 0) {
+        // User-requested stop (interrupt() killed the process): settle
+        // gracefully with a marker instead of throwing, so Slack shows a
+        // clean stop rather than an error.
+        if (this.interruptRequested) {
+          this.interruptRequested = false;
+          const out = "_(interrupted)_";
+          hooks.onFinal?.(out);
+          return { finalText: out };
+        }
         const stderr = await proc.stderr();
         // Dangling-rollout recovery: clear our pinned UUID so the next send
         // starts a fresh Codex session, and surface the failure to the
@@ -421,6 +461,7 @@ export class CodexRuntime implements Runtime {
       hooks.onFinal?.(out);
       return { finalText: out };
     } finally {
+      this.activeProc = null;
       // Always clean up the last-message file. Best-effort: a leftover in
       // tmp isn't a correctness issue but it accumulates.
       fs.unlink(lastMessageFile).catch(() => {});

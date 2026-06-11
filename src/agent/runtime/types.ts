@@ -143,6 +143,15 @@ export interface Runtime {
   send(input: SessionInput, hooks?: StreamHooks): Promise<SessionOutput>;
 
   /**
+   * Best-effort interrupt of the in-flight turn, like ctrl+c in a terminal.
+   * Resolves true when an active turn was signalled, false when nothing was
+   * running (or the signal couldn't be delivered). The interrupted `send()`
+   * still settles through its normal path — partial text is kept, and the
+   * caller's cleanup (streamer finalize, heartbeat stop) runs as usual.
+   */
+  interrupt(): Promise<boolean>;
+
+  /**
    * Update the cwd for subsequent turns AND rotate any conversation-resume
    * state so the next turn starts fresh in the new directory (avoiding
    * cross-thread bleed when two threads happen to share a workdir).

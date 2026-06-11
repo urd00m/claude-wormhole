@@ -57,6 +57,28 @@ To start a totally new conversation, send a new **top-level** message (not a rep
 
 ---
 
+## Interrupting a turn (`ctrl+c`)
+
+Sent the agent down the wrong path? Reply **`ctrl+c`** in the thread to stop the current action — the Slack analog of hitting ctrl+c in a terminal. Also accepted: `ctrl-c`, `^c`, `control+c`, `interrupt`, `/interrupt`.
+
+```
+You:   refactor the whole repo to use tabs
+Bot:   <starts grinding through files…>
+
+You:   [reply in thread] ctrl+c
+Bot:   🛑 Interrupt sent — stopping the current action.
+```
+
+What it does (and doesn't):
+
+- **Stops the in-flight turn only.** The session, its conversation history, and the thread's workdir all survive — your next message picks up where things stood. Use `end session` if you want a full teardown instead.
+- **Partial output stays.** Whatever streamed before the stop remains in the message.
+- **Skips the queue.** Normal messages in a busy thread wait their turn; `ctrl+c` jumps straight to the running action (a queued interrupt would only run after the turn it's meant to stop).
+- If nothing is running, the bot says so — it never spins up a session just to interrupt it.
+- The phrase must be the **whole message** — prose like "press ctrl+c to stop the build" is passed to the agent untouched, and `` !ctrl+c `` is still the literal shell command.
+
+---
+
 ## Attaching files
 
 Drop any file into Slack the way you normally would (drag-and-drop, paste, or the paperclip).
@@ -278,6 +300,7 @@ If you want full parity, use a Claude thread.
 
 - "Switch to claude" / "back to claude" reverts.
 - `end session` works in both runtimes.
+- `ctrl+c` (interrupt the in-flight turn) works in both runtimes — Claude stops via the SDK's interrupt control request (conversation intact, partial text kept); Codex stops by SIGTERM-ing the `codex exec` subprocess (a first turn that never finished isn't pinned, so the next message starts cleanly; resumed sessions keep their persisted history).
 - Workdir overrides set under Claude carry across to Codex and back — they live in `data/workdirs.json`, independent of the runtime.
 
 ---
