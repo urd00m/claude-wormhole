@@ -121,6 +121,15 @@ export class Session {
   }
 
   /**
+   * Best-effort interrupt of the in-flight turn (the "ctrl+c" control
+   * phrase). Runtime-neutral — Claude signals the SDK control channel,
+   * Codex kills its subprocess. Resolves true if a turn was signalled.
+   */
+  interrupt(): Promise<boolean> {
+    return this._runtime.interrupt();
+  }
+
+  /**
    * The session id the context_length skill can read a transcript for, or
    * null. Claude-only — Codex stores its rollout differently, so the
    * context-usage footer is skipped for Codex threads.

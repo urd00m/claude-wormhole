@@ -27,6 +27,8 @@ TESTS=(
   src/agent/runtime/claude.test.ts
   src/agent/runtime/codex.test.ts
   src/agent/runtime/codexWireFormat.test.ts
+  src/agent/interrupt.test.ts
+  src/slack/interruptMatcher.test.ts
   src/mcp/codexSpawnServer.test.ts
   src/slack/heartbeat.test.ts
   src/slack/contextIndicator.test.ts

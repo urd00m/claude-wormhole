@@ -142,6 +142,15 @@ export class ClaudeRuntime implements Runtime {
    * `Query.getContextUsage().maxTokens` or `result.modelUsage[].contextWindow`.
    */
   private contextWindowTokens: number | undefined = undefined;
+  /**
+   * The SDK Query for the in-flight send(), if any — the interrupt target.
+   * The SDK always launches the CLI with `--input-format stream-json`, so
+   * the control channel (and `Query.interrupt`) is available even though we
+   * pass a plain string prompt. Cleared when the message stream drains
+   * (per-thread sends are serialized by the manager queue, so there is at
+   * most one in flight).
+   */
+  private activeQuery: { interrupt?: () => Promise<void> } | null = null;
 
   constructor(opts: ClaudeRuntimeOpts) {
     this.threadKey = opts.threadKey;
@@ -171,6 +180,24 @@ export class ClaudeRuntime implements Runtime {
   resetConversation(): void {
     this.hasStarted = false;
     this.sessionId = randomUUID();
+  }
+
+  /**
+   * Interrupt the in-flight turn via the SDK's control channel. Returns
+   * false when no turn is running or the signal couldn't be delivered
+   * (e.g. the CLI already exited, or a test queryFn has no `interrupt`).
+   * The interrupted send() drains its stream and settles normally with
+   * whatever text accumulated before the stop.
+   */
+  async interrupt(): Promise<boolean> {
+    const q = this.activeQuery;
+    if (!q || typeof q.interrupt !== "function") return false;
+    try {
+      await q.interrupt();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -323,237 +350,245 @@ export class ClaudeRuntime implements Runtime {
     let turnOutputTokens = 0;
     let sawResult = false;
 
-    for await (const msg of q as AsyncIterable<SDKMessage>) {
-      // Sub-agent messages carry a non-null parent_tool_use_id. Skip
-      // user-visible side effects for them so the parent thread's stream,
-      // final-text capture, and tool strip reflect only the main agent.
-      const parentToolUseId =
-        "parent_tool_use_id" in msg
-          ? (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null
-          : null;
-      const isSubAgent = parentToolUseId != null;
+    // Expose the live query as the interrupt target for the duration of
+    // the stream. Cleared in `finally` so a turn that throws never leaves
+    // a stale pointer for a later ctrl+c to signal.
+    this.activeQuery = q as { interrupt?: () => Promise<void> };
+    try {
+      for await (const msg of q as AsyncIterable<SDKMessage>) {
+        // Sub-agent messages carry a non-null parent_tool_use_id. Skip
+        // user-visible side effects for them so the parent thread's stream,
+        // final-text capture, and tool strip reflect only the main agent.
+        const parentToolUseId =
+          "parent_tool_use_id" in msg
+            ? (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null
+            : null;
+        const isSubAgent = parentToolUseId != null;
 
-      // Depth bookkeeping runs for ALL assistant messages (sub-agent or not)
-      // so the cap fires on nested Task calls. Also classify each Agent
-      // call as background vs foreground based on the requested
-      // subagent_type, so the system-message handler below knows whether
-      // to surface it.
-      if (msg.type === "assistant") {
-        const content = msg.message?.content ?? [];
-        for (const block of content) {
-          if (block.type === "tool_use" && isSpawnTool(block.name)) {
-            const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
-            childDepthByToolUseId.set(block.id, depth);
-            const { isBackground } = rewriteSpawnInput(
-              (block.input ?? {}) as Record<string, unknown>,
-            );
-            if (isBackground) backgroundToolUseIds.add(block.id);
-          }
-        }
-      }
-
-      switch (msg.type) {
-        case "stream_event": {
-          if (isSubAgent) break;
-          const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } };
-          if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
-            hooks.onText?.(ev.delta.text);
-          }
-          break;
-        }
-        case "assistant": {
-          if (isSubAgent) break;
+        // Depth bookkeeping runs for ALL assistant messages (sub-agent or not)
+        // so the cap fires on nested Task calls. Also classify each Agent
+        // call as background vs foreground based on the requested
+        // subagent_type, so the system-message handler below knows whether
+        // to surface it.
+        if (msg.type === "assistant") {
           const content = msg.message?.content ?? [];
           for (const block of content) {
-            if (block.type === "text") {
-              finalText += block.text;
-            } else if (block.type === "tool_use") {
-              if (!seenToolStarts.has(block.id)) {
-                seenToolStarts.add(block.id);
-                hooks.onToolStart?.(block.id, block.name, (block.input ?? {}) as Record<string, unknown>);
-              }
+            if (block.type === "tool_use" && isSpawnTool(block.name)) {
+              const depth = computeChildDepth(parentToolUseId, childDepthByToolUseId);
+              childDepthByToolUseId.set(block.id, depth);
+              const { isBackground } = rewriteSpawnInput(
+                (block.input ?? {}) as Record<string, unknown>,
+              );
+              if (isBackground) backgroundToolUseIds.add(block.id);
             }
           }
-          break;
         }
-        case "user": {
-          if (isSubAgent) break;
-          const content = msg.message?.content;
-          if (Array.isArray(content)) {
+
+        switch (msg.type) {
+          case "stream_event": {
+            if (isSubAgent) break;
+            const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } };
+            if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
+              hooks.onText?.(ev.delta.text);
+            }
+            break;
+          }
+          case "assistant": {
+            if (isSubAgent) break;
+            const content = msg.message?.content ?? [];
             for (const block of content) {
-              if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
-                const tr = block as { tool_use_id?: string; is_error?: boolean };
-                if (tr.tool_use_id) {
-                  hooks.onToolEnd?.(tr.tool_use_id, !tr.is_error);
+              if (block.type === "text") {
+                finalText += block.text;
+              } else if (block.type === "tool_use") {
+                if (!seenToolStarts.has(block.id)) {
+                  seenToolStarts.add(block.id);
+                  hooks.onToolStart?.(block.id, block.name, (block.input ?? {}) as Record<string, unknown>);
                 }
               }
             }
+            break;
           }
-          break;
-        }
-        case "result": {
-          type IterationUsage = {
-            input_tokens?: number;
-            output_tokens?: number;
-            cache_read_input_tokens?: number;
-            cache_creation_input_tokens?: number;
-            type?: string;
-          };
-          const r = msg as {
-            subtype?: string;
-            result?: string;
-            total_cost_usd?: number;
-            usage?: {
+          case "user": {
+            if (isSubAgent) break;
+            const content = msg.message?.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
+                  const tr = block as { tool_use_id?: string; is_error?: boolean };
+                  if (tr.tool_use_id) {
+                    hooks.onToolEnd?.(tr.tool_use_id, !tr.is_error);
+                  }
+                }
+              }
+            }
+            break;
+          }
+          case "result": {
+            type IterationUsage = {
               input_tokens?: number;
               output_tokens?: number;
               cache_read_input_tokens?: number;
               cache_creation_input_tokens?: number;
-              iterations?: IterationUsage[] | null;
+              type?: string;
             };
-            modelUsage?: Record<string, { contextWindow?: number }>;
-          };
-          if (r.subtype === "success" && typeof r.result === "string") {
-            resultText = r.result;
-          }
-          // total_cost_usd is this query's cost (SDK-computed from
-          // per-model API rates); summing across sends gives cumulative
-          // session spend. On a subscription account this is NOTIONAL —
-          // it's not money you actually pay, it's the equivalent API price.
-          if (typeof r.total_cost_usd === "number") turnCostUsd = r.total_cost_usd;
-          if (r.usage) {
-            turnOutputTokens = r.usage.output_tokens ?? 0;
-            // Prefer the LAST iteration's input — per Anthropic SDK:
-            // "Calculate the true context window size from the last iteration."
-            // The top-level fields are SUMMED across iterations (tool-use
-            // loops), so they overshoot context on multi-iteration turns.
-            const iters = Array.isArray(r.usage.iterations) ? r.usage.iterations : null;
-            const last = iters && iters.length > 0 ? iters[iters.length - 1] : null;
-            if (last) {
-              turnInputTokens =
-                (last.input_tokens ?? 0) +
-                (last.cache_read_input_tokens ?? 0) +
-                (last.cache_creation_input_tokens ?? 0);
-            } else {
-              // Fallback path (single-iteration turn, or older SDK without
-              // iterations[]): the top-level sum equals the only iteration.
-              turnInputTokens =
-                (r.usage.input_tokens ?? 0) +
-                (r.usage.cache_read_input_tokens ?? 0) +
-                (r.usage.cache_creation_input_tokens ?? 0);
+            const r = msg as {
+              subtype?: string;
+              result?: string;
+              total_cost_usd?: number;
+              usage?: {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+                iterations?: IterationUsage[] | null;
+              };
+              modelUsage?: Record<string, { contextWindow?: number }>;
+            };
+            if (r.subtype === "success" && typeof r.result === "string") {
+              resultText = r.result;
             }
-          }
-          // Model's real context window — pick the max across reported models
-          // (one entry per model used in the turn; main model dominates).
-          if (r.modelUsage) {
-            for (const mu of Object.values(r.modelUsage)) {
-              if (mu && typeof mu.contextWindow === "number" && mu.contextWindow > 0) {
-                this.contextWindowTokens = Math.max(this.contextWindowTokens ?? 0, mu.contextWindow);
+            // total_cost_usd is this query's cost (SDK-computed from
+            // per-model API rates); summing across sends gives cumulative
+            // session spend. On a subscription account this is NOTIONAL —
+            // it's not money you actually pay, it's the equivalent API price.
+            if (typeof r.total_cost_usd === "number") turnCostUsd = r.total_cost_usd;
+            if (r.usage) {
+              turnOutputTokens = r.usage.output_tokens ?? 0;
+              // Prefer the LAST iteration's input — per Anthropic SDK:
+              // "Calculate the true context window size from the last iteration."
+              // The top-level fields are SUMMED across iterations (tool-use
+              // loops), so they overshoot context on multi-iteration turns.
+              const iters = Array.isArray(r.usage.iterations) ? r.usage.iterations : null;
+              const last = iters && iters.length > 0 ? iters[iters.length - 1] : null;
+              if (last) {
+                turnInputTokens =
+                  (last.input_tokens ?? 0) +
+                  (last.cache_read_input_tokens ?? 0) +
+                  (last.cache_creation_input_tokens ?? 0);
+              } else {
+                // Fallback path (single-iteration turn, or older SDK without
+                // iterations[]): the top-level sum equals the only iteration.
+                turnInputTokens =
+                  (r.usage.input_tokens ?? 0) +
+                  (r.usage.cache_read_input_tokens ?? 0) +
+                  (r.usage.cache_creation_input_tokens ?? 0);
               }
             }
-          }
-          // Authoritative context-usage breakdown, via the SDK's Query
-          // method (same call that powers the interactive CLI's /context).
-          // It returns totalTokens + maxTokens (real window) directly. We
-          // call it AT the result message, before the iterator closes —
-          // overrides the iteration-derived fallback above when present.
-          // Best-effort: a failure (older SDK / IPC issue) leaves the
-          // fallback in place rather than break the turn.
-          const qWithGet = q as {
-            getContextUsage?: () => Promise<{ totalTokens?: number; maxTokens?: number; percentage?: number }>;
-          };
-          if (typeof qWithGet.getContextUsage === "function") {
-            try {
-              const ctx = await qWithGet.getContextUsage();
-              if (ctx && typeof ctx.totalTokens === "number" && ctx.totalTokens > 0) {
-                turnInputTokens = ctx.totalTokens;
+            // Model's real context window — pick the max across reported models
+            // (one entry per model used in the turn; main model dominates).
+            if (r.modelUsage) {
+              for (const mu of Object.values(r.modelUsage)) {
+                if (mu && typeof mu.contextWindow === "number" && mu.contextWindow > 0) {
+                  this.contextWindowTokens = Math.max(this.contextWindowTokens ?? 0, mu.contextWindow);
+                }
               }
-              if (ctx && typeof ctx.maxTokens === "number" && ctx.maxTokens > 0) {
-                this.contextWindowTokens = ctx.maxTokens;
-              }
-            } catch {
-              // fall through to the iteration-derived value we already set
             }
+            // Authoritative context-usage breakdown, via the SDK's Query
+            // method (same call that powers the interactive CLI's /context).
+            // It returns totalTokens + maxTokens (real window) directly. We
+            // call it AT the result message, before the iterator closes —
+            // overrides the iteration-derived fallback above when present.
+            // Best-effort: a failure (older SDK / IPC issue) leaves the
+            // fallback in place rather than break the turn.
+            const qWithGet = q as {
+              getContextUsage?: () => Promise<{ totalTokens?: number; maxTokens?: number; percentage?: number }>;
+            };
+            if (typeof qWithGet.getContextUsage === "function") {
+              try {
+                const ctx = await qWithGet.getContextUsage();
+                if (ctx && typeof ctx.totalTokens === "number" && ctx.totalTokens > 0) {
+                  turnInputTokens = ctx.totalTokens;
+                }
+                if (ctx && typeof ctx.maxTokens === "number" && ctx.maxTokens > 0) {
+                  this.contextWindowTokens = ctx.maxTokens;
+                }
+              } catch {
+                // fall through to the iteration-derived value we already set
+              }
+            }
+            sawResult = true;
+            break;
           }
-          sawResult = true;
-          break;
-        }
-        case "system": {
-          const s = msg as {
-            subtype?: string;
-            task_id?: string;
-            tool_use_id?: string;
-            description?: string;
-            subagent_type?: string;
-            summary?: string;
-            status?: "completed" | "failed" | "stopped";
-            patch?: { status?: string; error?: string };
-          };
-          const tuid = s.tool_use_id;
-          const isBackground =
-            (tuid != null && backgroundToolUseIds.has(tuid)) ||
-            (s.task_id != null && backgroundTaskIds.has(s.task_id));
-          if (!isBackground) break;
-          if (s.task_id) backgroundTaskIds.add(s.task_id);
+          case "system": {
+            const s = msg as {
+              subtype?: string;
+              task_id?: string;
+              tool_use_id?: string;
+              description?: string;
+              subagent_type?: string;
+              summary?: string;
+              status?: "completed" | "failed" | "stopped";
+              patch?: { status?: string; error?: string };
+            };
+            const tuid = s.tool_use_id;
+            const isBackground =
+              (tuid != null && backgroundToolUseIds.has(tuid)) ||
+              (s.task_id != null && backgroundTaskIds.has(s.task_id));
+            if (!isBackground) break;
+            if (s.task_id) backgroundTaskIds.add(s.task_id);
 
-          switch (s.subtype) {
-            case "task_started":
-              if (s.task_id) {
-                hooks.onTaskEvent?.({
-                  kind: "started",
-                  taskId: s.task_id,
-                  toolUseId: tuid,
-                  description: s.description ?? "(no description)",
-                  subagentType: s.subagent_type,
-                });
-              }
-              break;
-            case "task_progress":
-              if (s.task_id) {
-                hooks.onTaskEvent?.({
-                  kind: "progress",
-                  taskId: s.task_id,
-                  toolUseId: tuid,
-                  description: s.description ?? "",
-                  summary: s.summary,
-                });
-              }
-              break;
-            case "task_notification":
-              if (s.task_id && s.status) {
-                hooks.onTaskEvent?.({
-                  kind: "notification",
-                  taskId: s.task_id,
-                  toolUseId: tuid,
-                  status: s.status,
-                  summary: s.summary ?? "",
-                });
-              }
-              break;
-            default:
-              break;
-          }
-          break;
-        }
-        case "rate_limit_event": {
-          // Subscription rate-limit utilization. Only present for claude.ai
-          // subscription users, and `utilization` is omitted at low usage —
-          // so we keep the latest known value per window and tolerate gaps.
-          const info = (msg as { rate_limit_info?: { rateLimitType?: string; utilization?: number } }).rate_limit_info;
-          if (info && typeof info.utilization === "number") {
-            // Normalize: the field is a fraction (0–1) on some versions, a
-            // percentage on others. Treat <=1 as a fraction.
-            const pct = info.utilization <= 1 ? info.utilization * 100 : info.utilization;
-            if (info.rateLimitType === "five_hour") {
-              this.rateLimits.fiveHourPct = pct;
-            } else if (typeof info.rateLimitType === "string" && info.rateLimitType.startsWith("seven_day")) {
-              this.rateLimits.weeklyPct = pct;
+            switch (s.subtype) {
+              case "task_started":
+                if (s.task_id) {
+                  hooks.onTaskEvent?.({
+                    kind: "started",
+                    taskId: s.task_id,
+                    toolUseId: tuid,
+                    description: s.description ?? "(no description)",
+                    subagentType: s.subagent_type,
+                  });
+                }
+                break;
+              case "task_progress":
+                if (s.task_id) {
+                  hooks.onTaskEvent?.({
+                    kind: "progress",
+                    taskId: s.task_id,
+                    toolUseId: tuid,
+                    description: s.description ?? "",
+                    summary: s.summary,
+                  });
+                }
+                break;
+              case "task_notification":
+                if (s.task_id && s.status) {
+                  hooks.onTaskEvent?.({
+                    kind: "notification",
+                    taskId: s.task_id,
+                    toolUseId: tuid,
+                    status: s.status,
+                    summary: s.summary ?? "",
+                  });
+                }
+                break;
+              default:
+                break;
             }
+            break;
           }
-          break;
+          case "rate_limit_event": {
+            // Subscription rate-limit utilization. Only present for claude.ai
+            // subscription users, and `utilization` is omitted at low usage —
+            // so we keep the latest known value per window and tolerate gaps.
+            const info = (msg as { rate_limit_info?: { rateLimitType?: string; utilization?: number } }).rate_limit_info;
+            if (info && typeof info.utilization === "number") {
+              // Normalize: the field is a fraction (0–1) on some versions, a
+              // percentage on others. Treat <=1 as a fraction.
+              const pct = info.utilization <= 1 ? info.utilization * 100 : info.utilization;
+              if (info.rateLimitType === "five_hour") {
+                this.rateLimits.fiveHourPct = pct;
+              } else if (typeof info.rateLimitType === "string" && info.rateLimitType.startsWith("seven_day")) {
+                this.rateLimits.weeklyPct = pct;
+              }
+            }
+            break;
+          }
+          default:
+            break;
         }
-        default:
-          break;
       }
+    } finally {
+      this.activeQuery = null;
     }
 
     // Only mark "started" against the sessionId we actually handed to the

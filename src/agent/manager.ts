@@ -26,6 +26,14 @@ class SessionEntry {
     this.session = session;
   }
 
+  /**
+   * True while a queued turn is executing — the window where
+   * `session.interrupt()` has something to stop.
+   */
+  get busy(): boolean {
+    return this.running;
+  }
+
   async enqueue(work: () => Promise<void>): Promise<void> {
     return new Promise((resolve, reject) => {
       this.queue.push(async () => {
@@ -167,6 +175,15 @@ export class SessionManager {
 
   has(key: ThreadKey): boolean {
     return this.entries.has(key);
+  }
+
+  /**
+   * The existing entry for `key` WITHOUT creating one. Interrupt path:
+   * a "ctrl+c" against a thread with no live session must not spin one up
+   * just to find there's nothing to stop.
+   */
+  peek(key: ThreadKey): SessionEntry | undefined {
+    return this.entries.get(key);
   }
 
   /**

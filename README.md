@@ -26,6 +26,7 @@ Think of it as Claude Code or Codex CLI in your DMs.
 - **Context + usage footer** (Claude) — each reply ends with a compact `🧠 [▰▰▱▱▱] 38% · 380k/1M · 📊 5h 42% · wk 18% · $~0.42` showing context-window fullness (from the SDK's `getContextUsage`), subscription quota (from `/api/oauth/usage` via `scripts/fetch-usage.sh` — needs `jq`), and notional API-equivalent cost.
 - **Scheduled runs (cron)** (Claude only) — ask in plain English ("every Monday at 9am, summarize PRs in #engineering"); the agent registers a cron and the prompt fires on schedule. Schedules persist across restarts.
 - **Point a thread at a real project** — say "work in /Users/me/code/myrepo" and the agent switches its working directory for that thread, picking up `CLAUDE.md` / `AGENTS.md` and project context. Per-thread, persistent across restarts. Workdir is shared across runtimes.
+- **Interrupt a running turn** — send `ctrl+c` (or `^c`, `interrupt`) in a thread to stop whatever the agent is currently doing, like ctrl+c in a terminal. Partial output stays; the session and its conversation survive — the next message continues where things stood. Works in both runtimes (Claude via the SDK's interrupt control request, Codex by terminating its subprocess).
 - **End a session on demand** — say `end session` (or `close session`) in a thread to close its agent session immediately. The next message in that thread starts fresh.
 
 ---
