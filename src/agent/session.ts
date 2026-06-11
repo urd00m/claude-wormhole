@@ -51,6 +51,17 @@ type SessionOpts = SessionLegacyOpts | SessionInjectedOpts;
 export class Session {
   readonly threadKey: string;
   private readonly _runtime: Runtime;
+  private _active = false;
+
+  /**
+   * True while a send() turn is in flight. Used by the completion-wake
+   * mechanism (slack/completionWake.ts) to decide whether a background-task
+   * completion needs to re-invoke the agent: if a turn is already active the
+   * SDK delivers the completion into it, so we only wake when idle.
+   */
+  get isActive(): boolean {
+    return this._active;
+  }
 
   constructor(opts: SessionOpts) {
     this.threadKey = opts.threadKey;
@@ -123,7 +134,12 @@ export class Session {
     return this._runtime instanceof ClaudeRuntime ? this._runtime.usageSnapshot() : null;
   }
 
-  send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
-    return this._runtime.send(input, hooks);
+  async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
+    this._active = true;
+    try {
+      return await this._runtime.send(input, hooks);
+    } finally {
+      this._active = false;
+    }
   }
 }

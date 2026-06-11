@@ -12,6 +12,7 @@ import { buildConfigMcp } from "../agent/tools/config.js";
 import { buildCanUseTool } from "../agent/canUseTool.js";
 import { tryResolveByReply } from "./consent.js";
 import { buildTaskEventPoster } from "./taskEvents.js";
+import { withCompletionWake } from "./completionWake.js";
 import { markActive, unmarkActive } from "./activeMarker.js";
 import { isEndSessionPhrase } from "./endSessionMatcher.js";
 import { detectRuntimeSwitch } from "./runtimeMatcher.js";
@@ -303,6 +304,14 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       };
       const canUseToolCtx = { client, channel: msg.channel, threadTs: replyThreadTs };
 
+      // Completion-wake (slack/completionWake.ts): a background task that
+      // finishes while this session is idle must re-invoke the agent, not just
+      // post a Slack message. `wakePoster` is assigned below (it needs
+      // runWakeTurn, which needs the MCP servers), so the spawn MCP routes its
+      // task events through a late-bound forwarder — wake then also covers
+      // tasks spawned during this turn.
+      let wakePoster = taskEventPoster;
+
       const mcpServers: Record<string, ReturnType<typeof buildSlackMcp>> = {
         slack: buildSlackMcp(slackCtx),
         workdir: buildWorkdirMcp({ session: entry.session, threadKey: key }),
@@ -315,7 +324,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           threadKey: key,
           buildSlackMcp: () => buildSlackMcp(slackCtx),
           buildCanUseTool: () => buildCanUseTool(canUseToolCtx),
-          onTaskEvent: taskEventPoster,
+          onTaskEvent: (event) => wakePoster(event),
         }),
         // macro/alias management — lets the user add macros/aliases by
         // asking the bot, instead of hand-editing data/*.json.
@@ -331,6 +340,30 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       entry.session.setMcpServers(mcpServers);
       entry.session.setCanUseTool(buildCanUseTool(canUseToolCtx));
 
+      // One agent turn carrying a synthetic prompt — used to auto-wake the
+      // agent on an idle background-task completion. Mirrors the human-message
+      // turn below: fresh streamer, the same MCP servers, send(), finalize.
+      const runWakeTurn = async (prompt: string): Promise<void> => {
+        const wakeStreamer = new SlackStreamer(client, msg.channel, replyThreadTs);
+        await wakeStreamer.open();
+        try {
+          await entry.session.send(
+            { text: prompt },
+            {
+              onText: (chunk) => wakeStreamer.appendText(chunk),
+              onToolStart: (id, name) => wakeStreamer.toolStart(id, name),
+              onToolEnd: (id, ok) => wakeStreamer.toolEnd(id, ok),
+              onFinal: (text) => wakeStreamer.setText(text),
+              onTaskEvent: (event) => wakePoster(event),
+            },
+          );
+        } finally {
+          await wakeStreamer.finalize();
+        }
+      };
+
+      wakePoster = withCompletionWake(taskEventPoster, entry.session, runWakeTurn);
+
       await entry.session.send(
         { text: msg.text, attachments },
         {
@@ -341,7 +374,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
           // This is the authoritative response and works even if no token
           // deltas were emitted.
           onFinal: (text) => streamer.setText(text),
-          onTaskEvent: taskEventPoster,
+          onTaskEvent: wakePoster,
         },
       );
 
