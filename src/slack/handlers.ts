@@ -16,7 +16,7 @@ import { withCompletionWake } from "./completionWake.js";
 import { markActive, unmarkActive } from "./activeMarker.js";
 import { isEndSessionPhrase } from "./endSessionMatcher.js";
 import { isInterruptPhrase } from "./interruptMatcher.js";
-import { detectRuntimeSwitch } from "./runtimeMatcher.js";
+import { detectRuntimeSwitch, detectRuntimeOpener } from "./runtimeMatcher.js";
 import { getRuntimeStore } from "../agent/runtimeStore.js";
 import { resolveRuntimeName } from "../agent/manager.js";
 import { getResidentWorkerRegistry } from "../agent/residentWorkerRegistry.js";
@@ -230,6 +230,21 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       text: `Runtime for this thread switched to \`${switchTo}\`. Your next message will run under it.`,
     });
     return;
+  }
+
+  // Runtime-opener prefix: "codex> <prompt>" or "claude> <prompt>".
+  // Sets the runtime for this thread AND immediately runs the prompt —
+  // one message to open a thread in a non-default runtime. Only fires
+  // when no session exists yet (new thread), so it doesn't collide with
+  // mid-conversation prose that happens to start with "codex:".
+  if (!sessions.has(key)) {
+    const opener = detectRuntimeOpener(msg.text);
+    if (opener) {
+      getRuntimeStore().set(key, opener.runtime);
+      msg.text = opener.prompt;
+      // Fall through to sessions.get() which will create a session
+      // under the newly-set runtime override.
+    }
   }
 
   // Launch-alias trigger: `<alias> [workdir] [prompt]`. If the first token

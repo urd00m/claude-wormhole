@@ -62,3 +62,40 @@ export function detectRuntimeSwitch(text: string): RuntimeName | null {
   if (CODEX_PHRASES.has(normalized)) return "codex";
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Runtime-opener prefix: "codex> <prompt>" or "claude> <prompt>".
+//
+// Unlike the runtime-switch phrases above (which consume the whole message
+// and require a SECOND message as the first prompt), the opener prefix
+// sets the runtime AND immediately runs the remainder as the first prompt.
+// This gives users a one-shot way to start a thread in a non-default
+// runtime.
+//
+// Patterns (case-insensitive, after stripping bot mention):
+//   "codex> write me hello world"  → { runtime: "codex", prompt: "write me hello world" }
+//   "codex: do the thing"          → { runtime: "codex", prompt: "do the thing" }
+//   "claude> explain X"            → { runtime: "claude", prompt: "explain X" }
+//   "just a normal message"        → null
+// ---------------------------------------------------------------------------
+
+export interface RuntimeOpener {
+  runtime: RuntimeName;
+  prompt: string;
+}
+
+const OPENER_RE = /^(?:<@[^>]+>\s*)?(claude|codex)\s*[>:]\s*/i;
+
+/**
+ * Detect a runtime-opener prefix at the start of a message. Returns
+ * the target runtime and the remaining prompt text, or null if the
+ * message doesn't match.
+ */
+export function detectRuntimeOpener(text: string): RuntimeOpener | null {
+  const m = OPENER_RE.exec(text);
+  if (!m) return null;
+  const runtime = m[1].toLowerCase() as RuntimeName;
+  const prompt = text.slice(m[0].length).trim();
+  if (prompt.length === 0) return null;
+  return { runtime, prompt };
+}

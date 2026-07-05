@@ -20,6 +20,7 @@ import {
 import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, SessionUsage, StreamHooks } from "./types.js";
 import { getCavemanStore } from "../cavemanStore.js";
 import { ensureCavemanReady } from "../../cavemanLink.js";
+import { getCredentialPool, type CredSlot } from "../../credentialPool.js";
 
 /**
  * Shape of the SDK's `query` export, minus the parts we don't use. Carved
@@ -290,6 +291,18 @@ export class ClaudeRuntime implements Runtime {
     const cavemanEnv =
       cavemanArtifacts && cavemanLevel !== "off" ? { CAVEMAN_DEFAULT_MODE: cavemanLevel } : {};
 
+    // Credential pool: acquire a slot if multi-account is configured.
+    // CLAUDE_CONFIG_DIR points the SDK's subprocess at that slot's
+    // credential directory. The slot is released (and potentially
+    // reported as rate-limited) after the stream drains.
+    const pool = getCredentialPool();
+    let acquiredSlot: CredSlot | null = null;
+    const credEnv: Record<string, string> = {};
+    if (pool && pool.size > 0) {
+      acquiredSlot = pool.acquire();
+      credEnv.CLAUDE_CONFIG_DIR = acquiredSlot.dir;
+    }
+
     const q = this.queryFn({
       prompt,
       options: {
@@ -321,7 +334,7 @@ export class ClaudeRuntime implements Runtime {
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         additionalDirectories: ["/"],
-        env: { ...buildChildEnv(), ...cavemanEnv },
+        env: { ...buildChildEnv(), ...cavemanEnv, ...credEnv },
       },
     });
 
@@ -570,7 +583,7 @@ export class ClaudeRuntime implements Runtime {
             // Subscription rate-limit utilization. Only present for claude.ai
             // subscription users, and `utilization` is omitted at low usage —
             // so we keep the latest known value per window and tolerate gaps.
-            const info = (msg as { rate_limit_info?: { rateLimitType?: string; utilization?: number } }).rate_limit_info;
+            const info = (msg as { rate_limit_info?: { rateLimitType?: string; utilization?: number; status?: string; resetsAt?: number } }).rate_limit_info;
             if (info && typeof info.utilization === "number") {
               // Normalize: the field is a fraction (0–1) on some versions, a
               // percentage on others. Treat <=1 as a fraction.
@@ -580,6 +593,11 @@ export class ClaudeRuntime implements Runtime {
               } else if (typeof info.rateLimitType === "string" && info.rateLimitType.startsWith("seven_day")) {
                 this.rateLimits.weeklyPct = pct;
               }
+            }
+            // Pool integration: when a slot is "rejected" (hard rate limit),
+            // mark it unavailable so the next send() picks a different account.
+            if (pool && acquiredSlot && info?.status === "rejected" && typeof info.resetsAt === "number") {
+              pool.reportRateLimit(acquiredSlot, info.resetsAt * 1000);
             }
             break;
           }

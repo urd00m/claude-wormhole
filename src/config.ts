@@ -47,6 +47,14 @@ export const configSchema = z.object({
    * 200k-tier session.
    */
   CONTEXT_WINDOW_TOKENS: z.coerce.number().int().positive().default(1_000_000),
+  /**
+   * Comma-separated list of paths to Claude credential directories. Each
+   * path should be a ~/.claude/-style directory containing .credentials.json
+   * (produced by `claude login`). The pool round-robins across them,
+   * skipping rate-limited accounts automatically. When empty/unset, the bot
+   * uses the single default auth (ANTHROPIC_API_KEY or ~/.claude/).
+   */
+  CLAUDE_CREDENTIAL_DIRS: z.string().optional(),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

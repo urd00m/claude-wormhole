@@ -10,6 +10,7 @@ import { clearAllOnBoot } from "./slack/activeMarker.js";
 import { ensureCommandsLinked } from "./skillsLink.js";
 import { ensureCavemanReady } from "./cavemanLink.js";
 import { getCavemanStore } from "./agent/cavemanStore.js";
+import { initCredentialPool } from "./credentialPool.js";
 
 async function main() {
   const auth = detectAuth();
@@ -22,6 +23,13 @@ async function main() {
     process.exit(1);
   }
   console.log(`🔐 Claude auth: ${describeAuth(auth)}`);
+
+  // Multi-account credential pool — balances across Claude subscriptions.
+  const pool = initCredentialPool(env.CLAUDE_CREDENTIAL_DIRS);
+  if (pool) {
+    const st = pool.status();
+    console.log(`🔄 Credential pool: ${st.available}/${st.total} account(s) available`);
+  }
 
   // Make the vendored arch-common command library available in every session
   // (symlink into ~/.claude/commands). Best-effort: a failure here never
@@ -83,6 +91,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log("\nshutting down…");
+    pool?.cleanup();
     scheduler?.stopAll();
     try {
       await app.stop();

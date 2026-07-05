@@ -2,7 +2,7 @@
 // and rejects prose / partial matches. Mirrors endSessionMatcher.test.ts
 // in spirit — accept list, reject list, both run through one harness.
 
-import { detectRuntimeSwitch } from "./runtimeMatcher.js";
+import { detectRuntimeSwitch, detectRuntimeOpener } from "./runtimeMatcher.js";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`ASSERT: ${msg}`);
@@ -106,7 +106,52 @@ async function main() {
     console.error(`❌ runtimeMatcher: ${fail} of ${cases.length} cases failed`);
     process.exit(1);
   }
-  console.log(`✅ runtimeMatcher verified — ${pass} cases (claude=${ACCEPTS_CLAUDE.length}, codex=${ACCEPTS_CODEX.length}, rejects=${REJECTS.length})`);
+  console.log(`✅ runtimeMatcher switch verified — ${pass} cases (claude=${ACCEPTS_CLAUDE.length}, codex=${ACCEPTS_CODEX.length}, rejects=${REJECTS.length})`);
+
+  // --- detectRuntimeOpener tests ---
+  let openerPass = 0;
+  let openerFail = 0;
+
+  type OpenerCase = { text: string; expect: { runtime: string; prompt: string } | null };
+  const openerCases: OpenerCase[] = [
+    // Should match
+    { text: "codex> write me hello world", expect: { runtime: "codex", prompt: "write me hello world" } },
+    { text: "Codex> fix the bug", expect: { runtime: "codex", prompt: "fix the bug" } },
+    { text: "CODEX> help", expect: { runtime: "codex", prompt: "help" } },
+    { text: "codex: do the thing", expect: { runtime: "codex", prompt: "do the thing" } },
+    { text: "claude> explain this code", expect: { runtime: "claude", prompt: "explain this code" } },
+    { text: "claude: what is this", expect: { runtime: "claude", prompt: "what is this" } },
+    { text: "<@U123> codex> build it", expect: { runtime: "codex", prompt: "build it" } },
+    { text: "<@U456> claude: run tests", expect: { runtime: "claude", prompt: "run tests" } },
+    // Should NOT match
+    { text: "codex>", expect: null },              // no prompt after prefix
+    { text: "codex> ", expect: null },             // only whitespace after prefix
+    { text: "use codex for this", expect: null },  // not the prefix pattern
+    { text: "I think codex: is great", expect: null }, // not at start
+    { text: "hello world", expect: null },
+    { text: "", expect: null },
+  ];
+
+  for (const { text, expect } of openerCases) {
+    const got = detectRuntimeOpener(text);
+    const match =
+      (got === null && expect === null) ||
+      (got !== null && expect !== null && got.runtime === expect.runtime && got.prompt === expect.prompt);
+    if (match) {
+      openerPass += 1;
+    } else {
+      openerFail += 1;
+      const gotStr = got ? `{runtime:${got.runtime}, prompt:"${got.prompt}"}` : "null";
+      const expStr = expect ? `{runtime:${expect.runtime}, prompt:"${expect.prompt}"}` : "null";
+      console.error(`  ✗ opener "${text}" → expected ${expStr}, got ${gotStr}`);
+    }
+  }
+
+  if (openerFail > 0) {
+    console.error(`❌ runtimeOpener: ${openerFail} of ${openerCases.length} cases failed`);
+    process.exit(1);
+  }
+  console.log(`✅ runtimeOpener verified — ${openerPass} cases`);
 }
 
 main().catch((err) => {
