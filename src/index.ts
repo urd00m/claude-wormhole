@@ -6,13 +6,22 @@ import { detectAuth, describeAuth } from "./auth.js";
 import { getCronStore } from "./scheduler/store.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { makeRunner } from "./scheduler/runner.js";
-import { clearAllOnBoot } from "./slack/activeMarker.js";
+import { clearAllOnBoot, markActive } from "./slack/activeMarker.js";
 import { ensureCommandsLinked } from "./skillsLink.js";
 import { ensureCavemanReady } from "./cavemanLink.js";
 import { getCavemanStore } from "./agent/cavemanStore.js";
 import { initCredentialPool } from "./credentialPool.js";
+import { getContinuityStore } from "./agent/continuityStore.js";
+import { verifyIndexedThreads } from "./agent/startupContinuity.js";
+import { ROOT_DIR } from "./config.js";
+import { sessions } from "./agent/manager.js";
+import { getResidentWorkerRegistry } from "./agent/residentWorkerRegistry.js";
+import { drainBackgroundWorkers } from "./agent/tools/spawn.js";
 
 async function main() {
+  const continuity = getContinuityStore();
+  await verifyIndexedThreads(ROOT_DIR, continuity);
+  continuity.acquireOwner();
   console.log(
     env.SLACK_ALLOWED_USER_IDS.length
       ? `🔒 Slack requests restricted to: ${env.SLACK_ALLOWED_USER_IDS.join(", ")}`
@@ -80,13 +89,17 @@ async function main() {
 
   try {
     await clearAllOnBoot(app.client);
+    for (const binding of continuity.list()) {
+      const location = binding.key.match(/^([CDG][A-Z0-9]+):(\d+\.\d+)$/);
+      if (binding.state !== "closed" && location) await markActive(app.client, location[1], location[2]);
+    }
   } catch (err) {
     console.warn(
       `[boot] clearAllOnBoot failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  registerHandlers(app);
+  const handlers = registerHandlers(app);
   registerInteractions(app);
 
   scheduler.start();
@@ -95,21 +108,31 @@ async function main() {
     console.log(`⏰ Scheduler active: ${cronCount} cron${cronCount === 1 ? "" : "s"} loaded`);
   }
 
+  let shutdownStarted = false;
   const shutdown = async () => {
-    console.log("\nshutting down…");
-    pool?.cleanup();
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    sessions.startDrain();
+    console.log("\nDraining accepted turns and workers; new messages remain in the durable inbox…");
     scheduler?.stopAll();
     try {
+      await handlers.waitForIdle();
+      await drainBackgroundWorkers();
+      await getResidentWorkerRegistry().drain();
+      await sessions.drain();
       await app.stop();
-    } catch {
-      /* ignore */
+      pool?.cleanup();
+      continuity.close();
+      process.exit(0);
+    } catch (error) {
+      console.error("Deployment drain did not complete; the process remains running. Do not force a restart.", error);
     }
-    process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
   await app.start();
+  void handlers.replayPending(app.client).catch((error) => console.error("Pending messages remain preserved; replay stopped:", error));
   console.log(`⚡️ Bolt app running (model=${env.ANTHROPIC_MODEL})`);
 }
 

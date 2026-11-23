@@ -104,7 +104,7 @@ async function main() {
       assert(claudeEntry.session.runtimeName === "claude", "first get is claude");
 
       // Simulate the runtime-switch flow: close the entry and flip the store.
-      mgr.close(key);
+      mgr.end(key);
       store.set(key, "codex");
 
       const codexEntry = (await mgr.get(key)).entry;

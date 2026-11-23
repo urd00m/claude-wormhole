@@ -95,6 +95,11 @@ export function activeBackgroundWorkerCount(): number {
   return inflightBackgroundWorkers.size;
 }
 
+/** Let recursive/background work finish before the bot releases ownership. */
+export async function drainBackgroundWorkers(): Promise<void> {
+  while (inflightBackgroundWorkers.size > 0) await Promise.allSettled([...inflightBackgroundWorkers.values()]);
+}
+
 /**
  * Build the `spawn` MCP server for a given level. Exposes one tool —
  * `spawn` — with synchronous (default) and background (fire-and-forget)

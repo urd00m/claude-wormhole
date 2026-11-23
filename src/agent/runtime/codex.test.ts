@@ -402,11 +402,10 @@ async function main() {
     assert(threw, "must throw on non-zero exit");
   }
 
-  // --- (8) Dangling-rollout recovery: 2nd send fails → sessionId cleared ---
+  // --- (8) Missing histories preserve identity and require recovery ---
   // Scenario: turn 1 succeeds and pins SESSION_A. Then the user prunes
   // ~/.codex/sessions/. Turn 2's `exec resume` fails with a "session not
-  // found" stderr; the runtime should throw, but also clear its pinned
-  // UUID so turn 3 starts a fresh `exec` (not yet another doomed resume).
+  // found" stderr; the runtime must preserve its pinned identity.
   {
     const captured: CapturedSpawn[] = [];
     const lastFile1 = lastMsgPathFor("d1");
@@ -431,7 +430,7 @@ async function main() {
         },
         {
           lines: [
-            metaLine("11111111-1111-1111-1111-111111111111"),
+            metaLine(SESSION_A),
             agentMessageLine("turn3"),
             taskCompleteLine("turn3"),
           ],
@@ -450,10 +449,10 @@ async function main() {
     }
     assert(threw, "dangling resume must throw");
 
-    // Turn 3 should now start fresh — `exec`, no `resume`.
+    // Retrying must address the original conversation, never a replacement.
     await rt.send({ text: "3" });
     const args3 = captured[2].args;
-    assert(args3[1] !== "resume", "post-dangle send starts fresh");
+    assert(args3[1] === "resume" && args3.includes(SESSION_A), "missing history preserves original identity");
   }
 
   // --- (9) Defensive parsing: garbage and unknown event types ignored ---

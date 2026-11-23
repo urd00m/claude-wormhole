@@ -34,6 +34,8 @@ import { env } from "../config.js";
 import { isAllowedSlackUser } from "./access.js";
 import { parseWatchdogCommand, watchdogRoute, type WatchdogRoute } from "./watchdog.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
+import { getContinuityStore } from "../agent/continuityStore.js";
+import { createHash } from "node:crypto";
 
 let _scheduler: Scheduler | null = null;
 export function setSchedulerForHandlers(s: Scheduler): void {
@@ -50,17 +52,24 @@ type Common = {
 };
 
 export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRoute) {
+  const durable = getContinuityStore();
+  let activeDispatches = 0;
+  const idleWaiters: (() => void)[] = [];
   // Slack can deliver both message and app_mention for the same post.
   // Remember completed posts too, since the second event may arrive later.
   const acceptedMessages = new Map<string, number>();
-  async function dispatch(client: WebClient, msg: Common) {
+  async function dispatch(client: WebClient, msg: Common, replayId?: string) {
     const now = Date.now();
     for (const [key, expires] of acceptedMessages) {
       if (expires > now) break;
       acceptedMessages.delete(key);
     }
-    const key = `${msg.channel}:${msg.ts}`;
+    const key = replayId ?? `${msg.channel}:${msg.ts}`;
     if (acceptedMessages.has(key)) return;
+    if (!replayId && !durable.acceptDelivery(key, threadKeyOf(msg.channel, msg.thread_ts ?? msg.ts), msg)) return;
+    if (sessions.isDraining) return; // Stored before acknowledging; next process can dispatch it.
+    if (!durable.claimDelivery(key)) return;
+    activeDispatches++;
     if (acceptedMessages.size >= 10_000) {
       acceptedMessages.delete(acceptedMessages.keys().next().value!);
     }
@@ -84,9 +93,15 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
         if (await tryResolveByReply(client, msg.channel, msg.thread_ts, consentText, msg.user)) return;
       }
       await handleIncoming(client, msg);
+      durable.finishDelivery(key);
     } catch (error) {
       acceptedMessages.delete(key);
+      durable.finishDelivery(key, error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      durable.finishDelivery(key); // Also completes control/report-only early returns.
+      activeDispatches--;
+      if (activeDispatches === 0) idleWaiters.splice(0).forEach((resolve) => resolve());
     }
   }
 
@@ -125,6 +140,19 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
       files: e.files,
     });
   });
+
+  return {
+    waitForIdle: (): Promise<void> => activeDispatches === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve)),
+    replayPending: async (client: WebClient): Promise<void> => {
+      for (const delivery of durable.deliveries("queued")) {
+        const binding = durable.get(delivery.thread_key);
+        if (binding?.state === "stopped" || binding?.state === "recovery_required") continue;
+        const msg = JSON.parse(delivery.payload) as Common;
+        if (!isAllowedSlackUser(msg.user)) continue;
+        await dispatch(client, msg, delivery.id);
+      }
+    },
+  };
 }
 
 const inFlight = new Set<string>();
@@ -225,7 +253,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
   // never race a just-added :satellite_antenna: against its own removal.
   if (isEndSessionPhrase(msg.text)) {
     inFlight.delete(dedupeKey);
-    const had = sessions.close(key);
+    const had = sessions.end(key);
     // Ending the session also kills any resident sub-agent workers owned by
     // this thread — they're scoped to it and shouldn't outlive it.
     const killedWorkers = getResidentWorkerRegistry().killAllForThread(key);
@@ -265,8 +293,9 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       });
       return;
     }
-    sessions.close(key);
+    sessions.end(key);
     await unmarkActive(client, msg.channel, replyThreadTs);
+    getActiveAliasStore().remove(key);
     getRuntimeStore().set(key, switchTo);
     await client.chat.postMessage({
       channel: msg.channel,
@@ -304,11 +333,12 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     // Optional workdir arg → macro-expand, validate, persist as the thread
     // override so the rebuilt session launches there (loads CLAUDE.md/AGENTS.md).
     let workdirNote = "";
+    let nextWorkdir: string | undefined;
     if (aliasInvocation.workdirArg) {
       const expandedWd = expandMacros(aliasInvocation.workdirArg, macros).trim();
       try {
         const resolved = resolveWorkdir(expandedWd);
-        getWorkdirStore().set(key, resolved);
+        nextWorkdir = resolved;
         workdirNote = ` in \`${resolved}\``;
       } catch (err) {
         inFlight.delete(dedupeKey);
@@ -323,8 +353,9 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     }
     // Pin the alias for the thread and tear down any existing session so the
     // next build picks up the alias's runtime + config + workdir.
+    sessions.end(key);
+    if (nextWorkdir) getWorkdirStore().set(key, nextWorkdir);
     getActiveAliasStore().set(key, aliasInvocation.alias);
-    sessions.close(key);
 
     const expandedPrompt = expandMacros(aliasInvocation.prompt, macros);
     if (expandedPrompt.trim().length === 0) {
@@ -432,22 +463,33 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       // agent on an idle background-task completion. Mirrors the human-message
       // turn below: fresh streamer, the same MCP servers, send(), finalize.
       const runWakeTurn = async (prompt: string): Promise<void> => {
-        const wakeStreamer = new SlackStreamer(client, msg.channel, replyThreadTs);
-        await wakeStreamer.open();
-        try {
-          await entry.session.send(
-            { text: prompt },
-            {
-              onText: (chunk) => wakeStreamer.appendText(chunk),
-              onToolStart: (id, name) => wakeStreamer.toolStart(id, name),
-              onToolEnd: (id, ok) => wakeStreamer.toolEnd(id, ok),
-              onFinal: (text) => wakeStreamer.setText(text),
-              onTaskEvent: (event) => wakePoster(event),
-            },
-          );
-        } finally {
-          await wakeStreamer.finalize();
-        }
+        const durable = getContinuityStore();
+        const id = `wake:${key}:${createHash("sha256").update(prompt).digest("hex")}`;
+        if (!durable.acceptDelivery(id, key, { ...msg, text: prompt, files: undefined })) return;
+        if (sessions.isDraining || durable.get(key)?.state !== "ready") return;
+        if (!durable.claimDelivery(id)) return;
+        await entry.enqueue(async () => {
+          const wakeStreamer = new SlackStreamer(client, msg.channel, replyThreadTs);
+          await wakeStreamer.open();
+          try {
+            await entry.session.send(
+              { text: prompt },
+              {
+                onText: (chunk) => wakeStreamer.appendText(chunk),
+                onToolStart: (id, name) => wakeStreamer.toolStart(id, name),
+                onToolEnd: (id, ok) => wakeStreamer.toolEnd(id, ok),
+                onFinal: (text) => wakeStreamer.setText(text),
+                onTaskEvent: (event) => wakePoster(event),
+              },
+            );
+            durable.finishDelivery(id);
+          } catch (error) {
+            durable.finishDelivery(id, error instanceof Error ? error.message : String(error));
+            throw error;
+          } finally {
+            await wakeStreamer.finalize();
+          }
+        });
       };
 
       wakePoster = withCompletionWake(taskEventPoster, entry.session, runWakeTurn);

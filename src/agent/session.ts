@@ -1,6 +1,8 @@
 import type { CanUseTool, McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeRuntime } from "./runtime/claude.js";
 import type { Runtime, SessionInput, SessionOutput, StreamHooks } from "./runtime/types.js";
+import type { ContinuityStore } from "./continuityStore.js";
+import { ProviderError } from "./providerError.js";
 
 // Re-export runtime-neutral types so existing imports
 // (`import { ... } from "./session.js"`) keep working unchanged.
@@ -49,6 +51,9 @@ type SessionInjectedOpts = {
 type SessionOpts = SessionLegacyOpts | SessionInjectedOpts;
 
 export class Session {
+  private continuity?: { store: ContinuityStore; key: string };
+
+  attachContinuity(store: ContinuityStore, key: string): void { this.continuity = { store, key }; }
   readonly threadKey: string;
   private readonly _runtime: Runtime;
   private _active = false;
@@ -144,11 +149,19 @@ export class Session {
   }
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
+    if (this._active) throw new Error("A turn is already active in this conversation.");
+    const c = this.continuity;
+    c?.store.beginTurn(c.key);
     this._active = true;
+    let failure: import("./providerError.js").ProviderFailure | undefined;
     try {
       return await this._runtime.send(input, hooks);
+    } catch (error) {
+      failure = error instanceof ProviderError ? error.failure : { message: error instanceof Error ? error.message : String(error) };
+      throw error;
     } finally {
       this._active = false;
+      c?.store.finishTurn(c.key, failure);
     }
   }
 }

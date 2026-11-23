@@ -344,7 +344,7 @@ src/
 See `TODO.md` for the deferred list. The big ones:
 
 - **Multi-workspace install** — single-workspace only for now (one set of tokens, no OAuth flow).
-- **Session persistence across restarts** — sessions are in-memory; restart loses the per-thread agent state (Slack messages stay, but the agent loses its context). Codex resumes by rollout UUID on disk, so Codex threads can survive bot restarts if the UUID is still pinned in `data/runtimes.json` — Claude threads lose context on restart.
+- **Session persistence** — Codex and Claude native conversation IDs are stored in the durable continuity registry. Runtime/model selections in `data/runtimes.json` and aliases are configuration, not conversation IDs. A missing or uncertain binding requires recovery; it never silently creates a replacement conversation.
 - **Stronger sandboxing** — the agent runs Bash on your laptop, scoped to `sessions/<threadKey>/`. The consent gate catches the common destructive patterns but is not a sandbox. Docker-per-session is sketched in TODO.
 - **Codex parity with Claude** — Codex *workers* can now spawn (a stdio `spawn` MCP), but a Codex *thread* still doesn't get the other wormhole MCP tools (`slack_post_file`, `set_workdir`, `cron_add`), and its destructive-command consent gate is coarser (`--sandbox workspace-write`, not per-call). The context/usage footer is Claude-only.
 
@@ -362,3 +362,99 @@ See `TODO.md` for the deferred list. The big ones:
 
 - **[TODO.md](./TODO.md)** — deferred features and known limitations.
 - **[USAGE.md](./USAGE.md)** — older walkthrough (the README above is the current, authoritative reference).
+
+## Session continuity and deployment
+
+This implementation preserves native provider conversations across orderly bot
+restarts. It does not clear an OpenAI safety-monitoring stop. No synthetic
+approval, continuation instruction, or automatic reset is generated.
+
+The continuity registry defaults to
+`~/.local/state/claude-wormhole/sessions.sqlite`. Set `WORMHOLE_STATE_DIR` to an
+absolute persistent directory when needed. Keep the database, its `.identity`
+anchor, and a consistent backup together; do not place them in a release tree.
+The tested runtime is Node 22.22.2, using its built-in `node:sqlite` module.
+
+Each binding records the Slack thread, exact native ID, provider configuration
+home, working directory, launch settings, and stopped/recovery state. Codex IDs
+are saved at `thread.started`, including a failed first turn. Claude and resident
+workers resume their recorded UUIDs. Credential-pool conversations stay with the
+account that created their transcript. Explicit user end/switch/alias commands
+can start a new conversation; unloading a runtime or restarting the bot cannot.
+
+Public structured provider failures are retained. A safety stop is persisted
+before subsequent turns run. Queued messages and background wakes check that
+state and do not invoke the stopped provider. The current CLI integration has no
+supported findings/continue action, so it shows the stopped state rather than a
+misleading retry button. Merely possessing a review target is never treated as
+permission to continue.
+
+Incoming messages are journaled before dispatch. During orderly shutdown new
+messages remain queued while accepted turns, background workers, resident
+workers, and per-thread queues drain. The next process dispatches queued,
+never-started messages with persistent deduplication. If a process dies during a
+turn, its conversation and delivery become uncertain: inspect the native history
+and reconcile any completed side effects before deciding how to continue.
+Uncertain actions are not automatically replayed. Session restoration preserves
+conversation context, not arbitrary in-process execution after a hard crash.
+
+### First migration: deployment approval required
+
+The old running bot has no persistence or graceful-drain support. The first
+cutover therefore requires an independently verified idle point. Do not assume
+that installing this change retroactively makes its shutdown safe.
+
+1. Implement and test in an isolated copy. The live `tsx watch` process restarts
+   when its source changes, so do not edit or copy files into its checkout.
+2. From the staged copy, inventory the legacy instance without modifying it:
+
+   ```bash
+   node --import tsx scripts/session-continuity.ts inventory --root /path/to/legacy-wormhole
+   ```
+
+   Inventory lists all primary candidates; it deliberately does not choose the
+   newest conversation. Review the exact IDs, provider homes, workdirs, and
+   launch settings for every indexed thread. Native subagents are excluded.
+   Prepare a manifest containing the inventory, `verified: true`, and a
+   `bindings` array. Each binding must include `key`, `runtime`, `workdir`,
+   `providerHome`, `sessionId`, `started: true`, `state`, and `launch` when set.
+3. Validate the manifest with the `validate` command and `--manifest <file>`.
+   Missing/duplicate mappings, changed candidates, invalid transcripts, and
+   changed legacy indexes block migration. Recorded native safety stops are
+   imported as stopped even if a proposed binding says ready.
+4. Obtain Alan's approval before stopping the old instance, importing bindings,
+   applying changes, or starting the replacement. Wait for its current turns and
+   workers to finish. Capture any remaining pending input and worker identities;
+   unresolved work or identities block the first cutover. Stop the old watcher
+   as well as its child bot so it cannot automatically restart. Refresh and
+   revalidate the manifest at this idle boundary.
+5. Only after that approval and shutdown, import with explicit arguments:
+
+   ```bash
+   node --import tsx scripts/session-continuity.ts import \
+     --root /path/to/legacy-wormhole --manifest /path/to/verified-manifest.json \
+     --state-dir /absolute/persistent/path/claude-wormhole \
+     --apply --confirm-stopped
+   ```
+
+   Import refuses a running legacy Node process or a provider worker in a
+   migrating working directory. It also refuses to overwrite a different
+   existing binding. It sends no provider requests.
+6. Apply only the reviewed Wormhole patch, preserving unrelated local edits and
+   third-party submodules. Start the approved version without a source watcher,
+   with the same persistent registry and original provider configuration homes.
+   Startup refuses indexed threads without imported identities. Verify that all
+   recorded IDs are unchanged before allowing normal traffic.
+
+For subsequent approved deployments, use the graceful drain and the same state
+directory. Do not impose a kill timeout on long-running turns. If draining fails,
+the bot remains running in maintenance mode and deployment must wait. A recovery
+build must understand this same registry; reverting to the old stateless code
+would again lose the link to saved conversations. Preserve the registry when
+rolling back code, and verify IDs before resuming intake.
+
+`npm test` uses fake providers and isolated state directories. Its restart suites
+exercise separate Node processes, stopped-state persistence, uncertain-turn
+handling, account pinning, resident-worker restoration, durable inbox replay,
+shared-cwd isolation, registry ownership, migration validation, and missing-state
+protection. No Slack or model credentials are used by these tests.

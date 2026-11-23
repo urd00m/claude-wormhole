@@ -8,6 +8,8 @@ import { getAliasStore, getActiveAliasStore, launchConfigOf } from "./aliasStore
 import { ClaudeRuntime } from "./runtime/claude.js";
 import { CodexRuntime } from "./runtime/codex.js";
 import type { AgentLaunchConfig, Runtime } from "./runtime/types.js";
+import { getContinuityStore, defaultProviderHome, RecoveryRequiredError, type ContinuityStore, type Binding } from "./continuityStore.js";
+import { validateNativeSession } from "./nativeSession.js";
 
 export type ThreadKey = string;
 
@@ -120,15 +122,21 @@ export function decideLaunch(opts: {
  * `Session` construction so SessionManager.get can swap runtimes without
  * Session having to know how to build them.
  */
-function buildRuntime(key: ThreadKey, workdir: string): Runtime {
-  const { runtime, launch } = resolveThreadLaunch(key);
+function buildRuntime(key: ThreadKey, workdir: string, store: ContinuityStore, binding: Binding): Runtime {
+  const { runtime, launch } = binding;
+  const continuity: import("./runtime/types.js").RuntimeContinuity = {
+    sessionId: binding.sessionId, started: binding.started, providerHome: binding.providerHome,
+    onIdentity: (identity) => { store.saveIdentity(key, identity); },
+  };
   if (runtime === "codex") {
-    return new CodexRuntime({ threadKey: key, workdir, launch });
+    return new CodexRuntime({ threadKey: key, workdir, launch, continuity });
   }
-  return new ClaudeRuntime({ threadKey: key, workdir, launch });
+  return new ClaudeRuntime({ threadKey: key, workdir, launch, continuity });
 }
 
 export class SessionManager {
+  private draining = false;
+  constructor(private readonly store: ContinuityStore = getContinuityStore(), private readonly validate = validateNativeSession, private readonly runtimeFactory = buildRuntime) {}
   private readonly entries = new Map<ThreadKey, SessionEntry>();
   /**
    * In-flight creation promises keyed by ThreadKey. Without this, two
@@ -150,17 +158,34 @@ export class SessionManager {
       return { entry: await inFlight, created: false };
     }
     const work = (async (): Promise<SessionEntry> => {
+      if (this.draining) throw new RecoveryRequiredError("Wormhole is draining for a deployment; the message remains queued.");
+      const saved = this.store.get(key);
       const override = getWorkdirStore().get(key);
       let workdir: string;
-      if (override) {
+      if (saved && saved.state !== "closed") {
+        workdir = saved.workdir;
+        if (saved.state === "ready") {
+          try { this.validate(saved); }
+          catch (error) {
+            this.store.update(key, { state: "recovery_required", failure: { message: error instanceof Error ? error.message : String(error) } });
+          }
+        }
+      } else if (override) {
         workdir = override;
       } else {
         const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "_");
         workdir = path.join(SESSIONS_DIR, safeKey);
         await fs.mkdir(path.join(workdir, "uploads"), { recursive: true });
       }
-      const runtime = buildRuntime(key, workdir);
+      let binding = this.store.get(key);
+      if (!binding || binding.state === "closed") {
+        const resolved = resolveThreadLaunch(key);
+        binding = { key, ...resolved, workdir, sessionId: null, started: false, providerHome: defaultProviderHome(resolved.runtime), state: "ready" };
+        this.store.put(binding);
+      }
+      const runtime = this.runtimeFactory(key, workdir, this.store, binding);
       const entry = new SessionEntry(new Session({ threadKey: key, runtime }));
+      entry.session.attachContinuity(this.store, key);
       this.entries.set(key, entry);
       return entry;
     })();
@@ -188,13 +213,28 @@ export class SessionManager {
 
   /**
    * Drop the in-memory session entry for `key`. Returns true if an entry was
-   * removed, false if none existed. The next message in that thread will
-   * spin up a fresh session (created=true) — under whatever runtime the
-   * store currently resolves to, so this is also the mechanism the
-   * runtime-switch control phrase relies on.
+   * removed, false if none existed. The next access rebuilds a runtime
+   * using the durable conversation binding. Explicit resets call end().
    */
   close(key: ThreadKey): boolean {
+    if (this.entries.get(key)?.busy) throw new RecoveryRequiredError("Wait for the active turn before unloading this session.");
     return this.entries.delete(key);
+  }
+
+  /** Explicit user operation. Process shutdown must never call this. */
+  end(key: ThreadKey): boolean {
+    if (this.entries.get(key)?.busy) throw new RecoveryRequiredError("Interrupt the active turn and wait for queued work before ending this conversation.");
+    this.store.end(key);
+    return this.close(key);
+  }
+
+  get isDraining(): boolean { return this.draining; }
+  startDrain(): void { this.draining = true; }
+  async drain(): Promise<void> {
+    this.startDrain();
+    await Promise.all(this.creating.values());
+    // Enqueuing a barrier lets every previously accepted turn finish.
+    await Promise.all([...this.entries.values()].map((entry) => entry.enqueue(async () => {})));
   }
 }
 

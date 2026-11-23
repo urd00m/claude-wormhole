@@ -2,8 +2,8 @@
 // model. Unlike the one-shot workers in spawn.ts (each a fresh `query()` /
 // `codex exec` that runs once and exits), a ResidentWorker holds ONE
 // streaming-input `query()` open across many invocations. Its context lives
-// in that process's memory — no resume cookie, no re-spawn. It stays alive
-// until kill() (by the main agent via worker_kill) or the bot process exits.
+// in that process between requests. Production also records its native
+// conversation ID so an orderly bot restart can restore that context.
 //
 // Mechanism (validated by scripts/spike-resident.ts against the real SDK):
 //   - query({ prompt: <AsyncIterable<SDKUserMessage>> }) opens streaming
@@ -33,6 +33,7 @@ import type { QueryFn } from "./claude.js";
 import type { EffortLevel } from "./types.js";
 import { getCavemanStore } from "../cavemanStore.js";
 import { ensureCavemanReady } from "../../cavemanLink.js";
+import { ProviderError } from "../providerError.js";
 
 /**
  * Push-able async iterable used as the resident query's input channel. The
@@ -90,6 +91,9 @@ export class InputChannel {
 export type ResidentWorkerStatus = "idle" | "running" | "dead";
 
 export type ResidentWorkerOpts = {
+  continuity?: import("./types.js").RuntimeContinuity;
+  beforeTurn?: () => void;
+  afterTurn?: (failure?: import("../providerError.js").ProviderFailure) => void;
   name: string;
   ownerThread: string;
   workdir: string;
@@ -123,6 +127,9 @@ export function buildResidentEnv(): Record<string, string> {
 }
 
 export class ResidentWorker {
+  private readonly opts: ResidentWorkerOpts;
+  private suspended = false;
+  private sessionId: string | null;
   readonly name: string;
   readonly ownerThread: string;
   readonly workdir: string;
@@ -137,6 +144,8 @@ export class ResidentWorker {
   private tail: Promise<unknown> = Promise.resolve();
 
   constructor(opts: ResidentWorkerOpts) {
+    this.opts = opts;
+    this.sessionId = opts.continuity?.sessionId ?? null;
     this.name = opts.name;
     this.ownerThread = opts.ownerThread;
     this.workdir = opts.workdir;
@@ -160,6 +169,7 @@ export class ResidentWorker {
     this.q = queryFn({
       prompt: this.input as AsyncIterable<unknown>,
       options: {
+        ...(opts.continuity ? (opts.continuity.started ? { resume: opts.continuity.sessionId } : { sessionId: opts.continuity.sessionId }) : {}),
         cwd: opts.workdir,
         model: opts.model ?? env.ANTHROPIC_MODEL,
         ...(opts.effort ? { effort: opts.effort } : {}),
@@ -173,7 +183,7 @@ export class ResidentWorker {
         additionalDirectories: ["/"],
         includePartialMessages: false,
         ...(cavemanExtraArgs ? { extraArgs: cavemanExtraArgs } : {}),
-        env: { ...buildResidentEnv(), ...cavemanEnvAdd },
+        env: { ...buildResidentEnv(), ...cavemanEnvAdd, ...(opts.continuity ? { CLAUDE_CONFIG_DIR: opts.continuity.providerHome } : {}) },
       },
     }) as AsyncGenerator<SDKMessage, void>;
   }
@@ -184,6 +194,7 @@ export class ResidentWorker {
    * interleave on the single streaming input/output channel.
    */
   send(prompt: string): Promise<string> {
+    if (this.suspended) return Promise.reject(new Error("Worker is suspended for deployment; its conversation is preserved."));
     const run = this.tail.then(() => this.sendInner(prompt));
     // Keep the chain alive even if a send rejects, so later sends still run.
     this.tail = run.catch(() => undefined);
@@ -196,15 +207,22 @@ export class ResidentWorker {
     }
     this.status = "running";
     this.lastRunAt = new Date().toISOString();
+    let failure: import("../providerError.js").ProviderFailure | undefined;
+    let began = false;
     try {
+      this.opts.beforeTurn?.();
+      began = true;
       this.input.push(prompt);
       const text = await this.readTurn();
       this.status = "idle";
       return text;
     } catch (err) {
+      failure = err instanceof ProviderError ? err.failure : { message: err instanceof Error ? err.message : String(err) };
       this.status = "dead";
       this.lastError = err instanceof Error ? err.message : String(err);
       throw err;
+    } finally {
+      if (began) this.opts.afterTurn?.(failure);
     }
   }
 
@@ -230,6 +248,12 @@ export class ResidentWorker {
         throw new Error(`resident worker '${this.name}' ended unexpectedly mid-turn`);
       }
       const msg = step.value;
+      if (msg.type === "system" && msg.subtype === "init") {
+        const id = (msg as { session_id?: string }).session_id;
+        if (this.sessionId && id && id !== this.sessionId) throw new ProviderError({ code: "conversation_identity_mismatch", message: "Resident worker returned a different native session ID." });
+        if (id) this.sessionId = id;
+        if (this.sessionId && this.opts.continuity) this.opts.continuity.onIdentity({ sessionId: this.sessionId, started: true, workdir: this.workdir, providerHome: this.opts.continuity.providerHome });
+      }
       if (msg.type === "assistant") {
         const content =
           (msg as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
@@ -240,6 +264,7 @@ export class ResidentWorker {
       } else if (msg.type === "result") {
         const r = msg as { subtype?: string; result?: string };
         if (r.subtype === "success" && typeof r.result === "string") resultText = r.result;
+        if (r.subtype === "success" && this.sessionId && this.opts.continuity) this.opts.continuity.onIdentity({ sessionId: this.sessionId, started: true, workdir: this.workdir, providerHome: this.opts.continuity.providerHome });
         return (assistantText.length > 0 ? assistantText : resultText ?? "") || "_(no response)_";
       }
     }
@@ -250,5 +275,13 @@ export class ResidentWorker {
     if (this.status === "dead") return;
     this.status = "dead";
     this.input.close();
+  }
+
+  async suspend(): Promise<void> {
+    this.suspended = true;
+    await this.tail;
+    this.input.close();
+    await this.q.return(undefined);
+    this.status = "dead";
   }
 }

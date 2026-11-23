@@ -41,6 +41,14 @@ export type AgentLaunchConfig = {
   claudeArgs?: Record<string, string | null>;
 };
 
+/** Durable identity notifications are synchronous: a write failure aborts the turn. */
+export type RuntimeContinuity = {
+  sessionId: string | null;
+  started: boolean;
+  providerHome: string;
+  onIdentity: (identity: { sessionId: string | null; started: boolean; workdir: string; providerHome: string }) => void;
+};
+
 /**
  * Cumulative usage for a session, accumulated across turns. Sourced from the
  * runtime's per-turn result (Claude SDK result message: total_cost_usd +
@@ -133,6 +141,7 @@ export type StreamHooks = {
  * cookie, etc.) — `Session` is runtime-agnostic and just forwards.
  */
 export interface Runtime {
+  readonly conversationId?: string | null;
   /** Stable identifier for telemetry / debug. */
   readonly name: "claude" | "codex";
 

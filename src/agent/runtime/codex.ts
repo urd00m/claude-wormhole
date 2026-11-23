@@ -50,6 +50,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { env } from "../../config.js";
+import { ProviderError, parseProviderError, isSafetyStop, stoppedMessage } from "../providerError.js";
 import type {
   AgentLaunchConfig,
   Runtime,
@@ -67,6 +68,7 @@ import { getCavemanStore } from "../cavemanStore.js";
 import { buildCodexCavemanPreamble, ensureCavemanReady } from "../../cavemanLink.js";
 
 export type CodexRuntimeOpts = {
+  continuity?: import("./types.js").RuntimeContinuity;
   threadKey: string;
   workdir: string;
   /** Per-session launch overrides (from an alias): model, effort, extra args. */
@@ -285,6 +287,9 @@ export class CodexRuntime implements Runtime {
   readonly threadKey: string;
   workdir: string;
   private sessionId: string | null = null;
+  private identityRevision = 0;
+  private readonly continuity?: import("./types.js").RuntimeContinuity;
+  private stoppedFailure: import("../providerError.js").ProviderFailure | null = null;
   private readonly launch?: AgentLaunchConfig;
   private readonly enableSpawnMcp: boolean;
   private readonly spawnDepth: number;
@@ -311,6 +316,8 @@ export class CodexRuntime implements Runtime {
     this.spawnDepth = opts.spawnDepth ?? 0;
     this.processFactory = opts.processFactory ?? spawnCodexProcess;
     this.lastMessageFileFactory = opts.lastMessageFileFactory ?? defaultLastMessageFile;
+    this.continuity = opts.continuity;
+    this.sessionId = opts.continuity?.sessionId ?? null;
   }
 
   setWorkdir(newWorkdir: string): void {
@@ -320,18 +327,29 @@ export class CodexRuntime implements Runtime {
     // Codex would either refuse (rollout cwd mismatch) or run in the old
     // logical context, neither of which is what the user asked for.
     this.sessionId = null;
+    this.identityRevision++;
+    this.stoppedFailure = null;
+    this.saveIdentity(false);
   }
 
   resetConversation(): void {
     this.sessionId = null;
+    this.identityRevision++;
+    this.stoppedFailure = null;
+    this.saveIdentity(false);
   }
+
+  private saveIdentity(started: boolean): void {
+    this.continuity?.onIdentity({ sessionId: this.sessionId, started, workdir: this.workdir, providerHome: this.continuity.providerHome });
+  }
+
+  get conversationId(): string | null { return this.sessionId; }
 
   /**
    * Interrupt the in-flight turn by killing the `codex exec` subprocess.
    * Returns false when nothing is running. Safe for conversation state:
-   * a first-turn session UUID is only pinned on SUCCESS, and resumed
-   * sessions keep their already-persisted rollout — so the next message
-   * resumes (or restarts) cleanly.
+   * a first-turn UUID is pinned on thread.started, including when the
+   * turn later fails. A restart never substitutes a new conversation.
    */
   async interrupt(): Promise<boolean> {
     const proc = this.activeProc;
@@ -342,6 +360,7 @@ export class CodexRuntime implements Runtime {
   }
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
+    if (this.stoppedFailure) throw new ProviderError({ ...this.stoppedFailure, message: stoppedMessage(this.sessionId, this.stoppedFailure) });
     const lastMessageFile = this.lastMessageFileFactory();
     let prompt = buildPrompt(input);
 
@@ -360,6 +379,7 @@ export class CodexRuntime implements Runtime {
     }
 
     const sessionIdAtStart = this.sessionId;
+    const revisionAtStart = this.identityRevision;
 
     // When spawn-MCP is enabled, attach the wormhole spawn server so this
     // codex worker can launch further agents. Its `-c mcp_servers…` flags
@@ -382,7 +402,7 @@ export class CodexRuntime implements Runtime {
     const proc: CodexProcess = this.processFactory({
       args,
       cwd: this.workdir,
-      env: { ...buildCodexEnv(), ...spawn.env },
+      env: { ...buildCodexEnv(), ...spawn.env, ...(this.continuity ? { CODEX_HOME: this.continuity.providerHome } : {}) },
     });
     this.activeProc = proc;
     // A stale flag could survive a prior turn whose process exited in the
@@ -395,15 +415,31 @@ export class CodexRuntime implements Runtime {
     // input from stdin..." log). We capture the first one we see and
     // surface it in preference to stderr when codex exits non-zero.
     let observedErrorMessage: string | null = null;
+    let observedFailure: import("../providerError.js").ProviderFailure | null = null;
+    let sawTurnFailed = false;
 
     try {
       for await (const line of proc.lines()) {
         const ev = tryParseLine(line);
         if (ev === null) continue;
         const newId = extractSessionId(ev);
+        if (newId !== null && observedSessionId !== null && newId !== observedSessionId) {
+          throw new ProviderError({ code: "conversation_identity_mismatch", message: "Codex attempted to switch conversations within one request. The original identity was preserved." });
+        }
         if (newId !== null && observedSessionId === null) {
           observedSessionId = newId;
+          if (sessionIdAtStart !== null && newId !== sessionIdAtStart) {
+            proc.kill("SIGTERM");
+            throw new ProviderError({ code: "conversation_identity_mismatch", message: "Codex returned a different conversation ID while resuming. The original binding was preserved; recovery is required." });
+          }
+          if (this.identityRevision === revisionAtStart) {
+            this.sessionId = newId;
+            this.saveIdentity(true);
+          }
         }
+        const failure = parseProviderError(ev);
+        if (failure && (!observedFailure || isSafetyStop(failure))) observedFailure = failure;
+        if ((ev as { type?: string } | null)?.type === "turn.failed") sawTurnFailed = true;
         const errMsg = extractErrorMessage(ev);
         if (errMsg !== null && observedErrorMessage === null) {
           observedErrorMessage = errMsg;
@@ -412,7 +448,11 @@ export class CodexRuntime implements Runtime {
       }
 
       const exitCode = await proc.wait();
-      if (exitCode !== 0) {
+      if (exitCode !== 0 || sawTurnFailed || (observedFailure && isSafetyStop(observedFailure))) {
+        if (observedFailure && isSafetyStop(observedFailure)) {
+          this.stoppedFailure = observedFailure;
+          throw new ProviderError({ ...observedFailure, sessionId: this.sessionId });
+        }
         // User-requested stop (interrupt() killed the process): settle
         // gracefully with a marker instead of throwing, so Slack shows a
         // clean stop rather than an error.
@@ -423,13 +463,9 @@ export class CodexRuntime implements Runtime {
           return { finalText: out };
         }
         const stderr = await proc.stderr();
-        // Dangling-rollout recovery: clear our pinned UUID so the next send
-        // starts a fresh Codex session, and surface the failure to the
-        // caller as a normal error (Slack handler converts it into an :x:
-        // + error message). We don't silently retry — the user might want
-        // to know their conversation history is gone.
+        // A missing history needs recovery; never substitute a fresh UUID.
         if (sessionIdAtStart !== null && isDanglingRolloutError(stderr)) {
-          this.sessionId = null;
+          throw new ProviderError({ code: "native_session_missing", message: `Saved Codex conversation ${sessionIdAtStart} is missing. Recovery is required; no replacement was created.` });
         }
         // Build the user-facing message: prefer the stdout error event
         // (the real diagnostic), then fall back to stderr, then a sentinel.
@@ -437,15 +473,13 @@ export class CodexRuntime implements Runtime {
           observedErrorMessage ??
           (stderr.trim().length > 0 ? stderr.trim() : null) ??
           "(no error detail)";
-        throw new Error(
-          `codex exec ${sessionIdAtStart === null ? "" : "resume "}exited with code ${exitCode}: ${detail}`,
-        );
+        throw new ProviderError({ ...observedFailure, message: `codex exec ${sessionIdAtStart === null ? "" : "resume "}exited with code ${exitCode}: ${detail}` });
       }
 
-      // Pin the session UUID only on first-send success. On resume we keep
-      // the existing pin (already correct).
-      if (sessionIdAtStart === null && observedSessionId !== null) {
+      // Confirm the identity already pinned when thread.started arrived.
+      if (this.identityRevision === revisionAtStart && sessionIdAtStart === null && observedSessionId !== null) {
         this.sessionId = observedSessionId;
+        this.saveIdentity(true);
       }
 
       // Read the authoritative final text from -o, falling back to empty
@@ -460,6 +494,10 @@ export class CodexRuntime implements Runtime {
       const out = finalText || "_(no response)_";
       hooks.onFinal?.(out);
       return { finalText: out };
+    } catch (error) {
+      proc.kill("SIGTERM");
+      await proc.wait();
+      throw error;
     } finally {
       this.activeProc = null;
       // Always clean up the last-message file. Best-effort: a leftover in

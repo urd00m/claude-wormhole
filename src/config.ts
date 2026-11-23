@@ -47,6 +47,7 @@ export const configSchema = z.object({
    * everything else falls back to this.
    */
   DEFAULT_RUNTIME: z.enum(["claude", "codex"]).default("claude"),
+  WORMHOLE_STATE_DIR: z.string().min(1).refine(path.isAbsolute, "must be an absolute persistent path").optional(),
   /**
    * Per-session context-usage footer on Claude replies. "on" (default)
    * appends a compact "🧠 [▰▰▱▱▱] 38% · 380k/1M" line to each reply,

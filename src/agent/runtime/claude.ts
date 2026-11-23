@@ -21,6 +21,7 @@ import type { AgentLaunchConfig, Runtime, SessionInput, SessionOutput, SessionUs
 import { getCavemanStore } from "../cavemanStore.js";
 import { ensureCavemanReady } from "../../cavemanLink.js";
 import { getCredentialPool, type CredSlot } from "../../credentialPool.js";
+import { ProviderError } from "../providerError.js";
 
 /**
  * Shape of the SDK's `query` export, minus the parts we don't use. Carved
@@ -33,6 +34,7 @@ export type QueryFn = (params: {
 }) => AsyncIterable<SDKMessage> | Query;
 
 export type ClaudeRuntimeOpts = {
+  continuity?: import("./types.js").RuntimeContinuity;
   threadKey: string;
   workdir: string;
   /** Per-session launch overrides (from an alias). Claude applies model +
@@ -113,6 +115,8 @@ export class ClaudeRuntime implements Runtime {
    * scenario this guards against.
    */
   private sessionId: string;
+  private readonly continuity?: import("./types.js").RuntimeContinuity;
+  private providerHome: string | undefined;
   private readonly launch?: AgentLaunchConfig;
   private readonly queryFn: QueryFn;
   /** Cumulative session usage, accumulated from each turn's result message. */
@@ -160,7 +164,11 @@ export class ClaudeRuntime implements Runtime {
     this.canUseTool = opts.canUseTool;
     this.mcpServers = opts.mcpServers;
     this.queryFn = opts.queryFn ?? (query as unknown as QueryFn);
-    this.sessionId = randomUUID();
+    this.continuity = opts.continuity;
+    this.sessionId = opts.continuity?.sessionId ?? randomUUID();
+    this.hasStarted = opts.continuity?.started ?? false;
+    this.providerHome = opts.continuity?.providerHome;
+    this.saveIdentity();
   }
 
   setMcpServers(servers: Record<string, McpSdkServerConfigWithInstance>): void {
@@ -176,12 +184,20 @@ export class ClaudeRuntime implements Runtime {
     this.workdir = newWorkdir;
     this.hasStarted = false;
     this.sessionId = randomUUID();
+    this.saveIdentity();
   }
 
   resetConversation(): void {
     this.hasStarted = false;
     this.sessionId = randomUUID();
+    this.saveIdentity();
   }
+
+  private saveIdentity(): void {
+    if (this.continuity) this.continuity.onIdentity({ sessionId: this.sessionId, started: this.hasStarted, workdir: this.workdir, providerHome: this.providerHome ?? this.continuity.providerHome });
+  }
+
+  get conversationId(): string { return this.sessionId; }
 
   /**
    * Interrupt the in-flight turn via the SDK's control channel. Returns
@@ -299,8 +315,12 @@ export class ClaudeRuntime implements Runtime {
     let acquiredSlot: CredSlot | null = null;
     const credEnv: Record<string, string> = {};
     if (pool && pool.size > 0) {
-      acquiredSlot = pool.acquire();
+      acquiredSlot = pool.acquire(this.hasStarted ? this.providerHome : undefined);
       credEnv.CLAUDE_CONFIG_DIR = acquiredSlot.dir;
+      this.providerHome = acquiredSlot.dir;
+      this.saveIdentity();
+    } else if (this.providerHome) {
+      credEnv.CLAUDE_CONFIG_DIR = this.providerHome;
     }
 
     const q = this.queryFn({
@@ -369,6 +389,12 @@ export class ClaudeRuntime implements Runtime {
     this.activeQuery = q as { interrupt?: () => Promise<void> };
     try {
       for await (const msg of q as AsyncIterable<SDKMessage>) {
+        if (msg.type === "system" && msg.subtype === "init" && this.sessionId === sessionIdAtStart) {
+          const nativeId = (msg as { session_id?: string }).session_id;
+          if (nativeId && nativeId !== sessionIdAtStart) throw new ProviderError({ code: "conversation_identity_mismatch", message: "Claude returned a different session ID; the original binding was preserved." });
+          this.hasStarted = true;
+          this.saveIdentity();
+        }
         // Sub-agent messages carry a non-null parent_tool_use_id. Skip
         // user-visible side effects for them so the parent thread's stream,
         // final-text capture, and tool strip reflect only the main agent.
@@ -617,6 +643,7 @@ export class ClaudeRuntime implements Runtime {
     // sessionIsolation.test.ts for the regression scenario.
     if (this.sessionId === sessionIdAtStart) {
       this.hasStarted = true;
+      this.saveIdentity();
     }
     // Fold this turn's usage into the cumulative session totals (once).
     if (sawResult) {

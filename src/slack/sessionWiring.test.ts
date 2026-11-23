@@ -87,8 +87,13 @@ for (const site of SITES) {
     const binderRe = new RegExp(
       `\\b(?:const|let|var)\\s+${escaped}\\s*=\\s*buildTaskEventPoster\\s*\\(`,
     );
+    // Completion-wake wraps a real poster; requiring a direct factory
+    // assignment incorrectly rejected the existing wakePoster wiring.
+    const wrapped = src.match(new RegExp(`\\b${escaped}\\s*=\\s*withCompletionWake\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*,`));
+    const wrappedSource = wrapped?.[1];
+    const wrappedBinder = wrappedSource && new RegExp(`\\b(?:const|let|var)\\s+${wrappedSource}\\s*=\\s*buildTaskEventPoster\\s*\\(`).test(src);
     assert(
-      binderRe.test(src),
+      binderRe.test(src) || wrappedBinder,
       `${site.label}: \`onTaskEvent: ${rhs}\` references identifier \`${rhs}\` but no \`const ${rhs} = buildTaskEventPoster(...)\` binder appears in the same file. ` +
         `If this hook is wired to a different factory, background sub-agent lifecycle events will not reach the Slack thread.`,
     );

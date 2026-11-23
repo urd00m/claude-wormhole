@@ -85,12 +85,12 @@ export class CredentialPool {
   }
 
   /** Pick the least-recently-used available slot, or throw. */
-  acquire(): CredSlot {
+  acquire(preferredDir?: string): CredSlot {
     const now = Date.now();
     this.reap(now);
 
     const ok = this.slots
-      .filter((s) => s.status === "ok")
+      .filter((s) => s.status === "ok" && (!preferredDir || s.dir === path.resolve(preferredDir)))
       .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
 
     if (ok.length === 0) {
@@ -98,7 +98,7 @@ export class CredentialPool {
         ? Math.min(...this.slots.map((s) => s.availableAt))
         : null;
       throw new AllRateLimitedError(
-        `All ${this.slots.length} credential slot(s) are unavailable`,
+        preferredDir ? "The conversation's pinned credential account is unavailable" : `All ${this.slots.length} credential slot(s) are unavailable`,
         earliest,
       );
     }
