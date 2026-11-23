@@ -7,6 +7,19 @@ export const configSchema = z.object({
   SLACK_APP_TOKEN: z.string().startsWith("xapp-", "must start with xapp-"),
   SLACK_BOT_TOKEN: z.string().startsWith("xoxb-", "must start with xoxb-"),
   SLACK_SIGNING_SECRET: z.string().min(1),
+  // Empty/unset blocks all incoming users. Outgoing notifications still work.
+  SLACK_ALLOWED_USER_IDS: z.string().default("").transform((value) =>
+    [...new Set(value.split(",").map((id) => id.trim()).filter(Boolean))],
+  ).refine((ids) => ids.every((id) => /^U[A-Z0-9]+$/.test(id)), {
+    message: "must contain comma-separated Slack user IDs (U...)",
+  }),
+  // Channels where allowed users may speak without mentioning the bot.
+  // Other channels require a direct bot mention; direct messages always work.
+  SLACK_UNMENTIONED_CHANNEL_IDS: z.string().default("").transform((value) =>
+    [...new Set(value.split(",").map((id) => id.trim()).filter(Boolean))],
+  ).refine((ids) => ids.every((id) => /^[CG][A-Z0-9]+$/.test(id)), {
+    message: "must contain comma-separated Slack channel IDs (C... or G...)",
+  }),
   // Optional: leave unset (or blank) and `claude login` into a Claude Pro/Max
   // subscription instead. When unset/empty, the SDK uses the OAuth credentials
   // at ~/.claude/. Empty strings are treated as "not set" downstream.

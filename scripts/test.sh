@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 export SLACK_APP_TOKEN=xapp-stub
 export SLACK_BOT_TOKEN=xoxb-stub
 export SLACK_SIGNING_SECRET=stub
+export SLACK_ALLOWED_USER_IDS=U1,U2,U3,U4
 export ANTHROPIC_API_KEY=stub
 
 TESTS=(
@@ -39,6 +40,9 @@ TESTS=(
   src/slack/sessionWiring.test.ts
   src/slack/download.test.ts
   src/slack/consent.test.ts
+  src/slack/access.test.ts
+  src/slack/watchdog.test.ts
+  src/slack/channelRouting.test.ts
   src/slack/endSessionMatcher.test.ts
   src/slack/activeMarker.test.ts
   src/scheduler/scheduler.test.ts

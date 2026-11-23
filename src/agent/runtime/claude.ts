@@ -251,7 +251,7 @@ export class ClaudeRuntime implements Runtime {
       }
       if (userCanUseTool) {
         const result = await userCanUseTool(toolName, effectiveInput, options);
-        if (result.behavior === "allow" && isSpawnTool(toolName)) {
+        if (result?.behavior === "allow" && isSpawnTool(toolName)) {
           return { behavior: "allow", updatedInput: effectiveInput };
         }
         return result;

@@ -94,7 +94,23 @@ You need three Slack values in `.env`. (Claude auth is separate — see the "Cla
 | `SLACK_SIGNING_SECRET` | **Basic Information → App Credentials → Signing Secret** |
 | `SLACK_BOT_TOKEN` (`xoxb-…`) | **OAuth & Permissions → Install to Workspace → Allow** → copy the Bot User OAuth Token shown after install |
 
-### 3. Invite the bot
+### 3. Restrict access and invite the bot
+
+Set `SLACK_ALLOWED_USER_IDS` in `.env` to your Slack member ID (profile → More →
+Copy member ID), for example `SLACK_ALLOWED_USER_IDS=U0123456789`. To allow
+multiple trusted users, separate their IDs with commas. Restart the bot after
+changing this setting. If empty or unset, all incoming messages and approval
+actions are ignored. Unauthorized requests receive no response and cannot start
+sessions, invoke commands, or approve or deny pending actions. Outgoing scheduled
+notifications still work, so other channel members can receive reset alerts
+without permission to operate the agent.
+
+Channel messages require a direct `@YourBotName` mention on each message,
+including replies in existing threads. Set `SLACK_UNMENTIONED_CHANNEL_IDS` to
+the comma-separated channel IDs where the bot should respond without a mention
+(this installation uses `C0B2H6C5T8C` for `#nala-fob`). DMs and group DMs work
+without mentions. Restart after changing this setting. In other channels,
+reply `@YourBotName yes` / `@YourBotName no` to approval prompts, or use their buttons.
 
 - **DM:** open Slack → search for the app name → message it directly. (DMs work as soon as install is done.)
 - **Channels:** `/invite @YourBotName` in any channel you want it to listen in.

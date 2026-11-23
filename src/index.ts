@@ -13,7 +13,13 @@ import { getCavemanStore } from "./agent/cavemanStore.js";
 import { initCredentialPool } from "./credentialPool.js";
 
 async function main() {
+  console.log(
+    env.SLACK_ALLOWED_USER_IDS.length
+      ? `🔒 Slack requests restricted to: ${env.SLACK_ALLOWED_USER_IDS.join(", ")}`
+      : "🔒 No Slack users allowed; set SLACK_ALLOWED_USER_IDS to enable incoming requests.",
+  );
   const auth = detectAuth();
+  console.log(`💬 Channel replies require @mentions except in: ${env.SLACK_UNMENTIONED_CHANNEL_IDS.join(", ") || "none"}. DMs do not require mentions.`);
   if (auth.kind === "none") {
     console.error(
       "❌ No Claude auth configured.\n" +

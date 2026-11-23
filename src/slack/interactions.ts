@@ -1,5 +1,6 @@
 import type { App } from "@slack/bolt";
 import { resolveConsent } from "./consent.js";
+import { isAllowedSlackUser } from "./access.js";
 
 export function registerInteractions(app: App) {
   app.action("consent_approve", async ({ ack, body, client }) => {
@@ -7,6 +8,7 @@ export function registerInteractions(app: App) {
     const action = (body as { actions?: Array<{ value?: string }> }).actions?.[0];
     const id = action?.value;
     const user = (body as { user?: { id?: string } }).user?.id ?? "someone";
+    if (!isAllowedSlackUser(user)) return;
     if (id) await resolveConsent(client, id, true, user);
   });
 
@@ -15,6 +17,7 @@ export function registerInteractions(app: App) {
     const action = (body as { actions?: Array<{ value?: string }> }).actions?.[0];
     const id = action?.value;
     const user = (body as { user?: { id?: string } }).user?.id ?? "someone";
+    if (!isAllowedSlackUser(user)) return;
     if (id) await resolveConsent(client, id, false, user);
   });
 }

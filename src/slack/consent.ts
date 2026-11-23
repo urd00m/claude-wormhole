@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import { isAllowedSlackUser } from "./access.js";
 
 type Pending = {
   resolve: (allowed: boolean) => void;
@@ -95,6 +96,7 @@ export async function resolveConsent(
   allowed: boolean,
   by: string,
 ): Promise<boolean> {
+  if (!isAllowedSlackUser(by)) return false;
   const p = pending.get(id);
   if (!p) return false;
   pending.delete(id);

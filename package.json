@@ -13,7 +13,7 @@
     "test": "bash scripts/test.sh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.143",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.283",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@slack/bolt": "^4.7.2",
     "@slack/web-api": "^7.16.0",

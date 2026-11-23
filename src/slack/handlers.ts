@@ -31,6 +31,8 @@ import { getCavemanStore } from "../agent/cavemanStore.js";
 import { formatContextFooter } from "./contextIndicator.js";
 import { getUsageStore } from "../usageStore.js";
 import { env } from "../config.js";
+import { isAllowedSlackUser } from "./access.js";
+import { parseWatchdogCommand, watchdogRoute, type WatchdogRoute } from "./watchdog.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 
 let _scheduler: Scheduler | null = null;
@@ -47,20 +49,61 @@ type Common = {
   files?: SlackFileRef[];
 };
 
-export function registerHandlers(app: App) {
-  app.event("message", async ({ event, client }) => {
-    const e = event as Partial<Common> & { subtype?: string; bot_id?: string };
+export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRoute) {
+  // Slack can deliver both message and app_mention for the same post.
+  // Remember completed posts too, since the second event may arrive later.
+  const acceptedMessages = new Map<string, number>();
+  async function dispatch(client: WebClient, msg: Common) {
+    const now = Date.now();
+    for (const [key, expires] of acceptedMessages) {
+      if (expires > now) break;
+      acceptedMessages.delete(key);
+    }
+    const key = `${msg.channel}:${msg.ts}`;
+    if (acceptedMessages.has(key)) return;
+    if (acceptedMessages.size >= 10_000) {
+      acceptedMessages.delete(acceptedMessages.keys().next().value!);
+    }
+    acceptedMessages.set(key, now + 5 * 60_000);
+    try {
+      const report = parseWatchdogCommand(msg.text);
+      if (report) {
+        if (!watchdog.allowed(msg.user)) return;
+        const output = report.error ?? await watchdog.run(report.args);
+        await client.chat.postMessage({
+          channel: msg.channel,
+          thread_ts: msg.thread_ts ?? msg.ts,
+          text: "```\n" + output.replace(/```/g, "`\u200b``") + "\n```",
+        });
+        return;
+      }
+      // Report-only users cannot enter consent, shell, control, or agent paths.
+      if (!isAllowedSlackUser(msg.user)) return;
+      if (msg.thread_ts && msg.text) {
+        const consentText = msg.text.replace(/^\s*<@[^>]+>\s*/, "");
+        if (await tryResolveByReply(client, msg.channel, msg.thread_ts, consentText, msg.user)) return;
+      }
+      await handleIncoming(client, msg);
+    } catch (error) {
+      acceptedMessages.delete(key);
+      throw error;
+    }
+  }
+
+  app.event("message", async ({ event, client, context }) => {
+    const e = event as Partial<Common> & { subtype?: string; bot_id?: string; channel_type?: string };
     if (e.subtype && e.subtype !== "file_share") return;
     if (e.bot_id) return;
     if (!e.channel || !e.ts || !e.user) return;
+    if (!isAllowedSlackUser(e.user) && !watchdog.allowed(e.user)) return;
+    // Recognize our exact mention from message events as well, so channels
+    // work even when the installed token lacks app_mentions:read.
+    const isDirectMessage = e.channel_type === "im" || e.channel_type === "mpim" || e.channel.startsWith("D");
+    const mentionsBot = !!context?.botUserId && !!e.text?.includes(`<@${context.botUserId}>`);
+    if (!isDirectMessage && !env.SLACK_UNMENTIONED_CHANNEL_IDS.includes(e.channel) && !mentionsBot) return;
     // Allow empty text when files are attached
     if (!e.text && !(e.files && e.files.length > 0)) return;
-    // If this is a thread reply to a pending consent prompt, consume it.
-    if (e.thread_ts && e.text) {
-      const consumed = await tryResolveByReply(client, e.channel, e.thread_ts, e.text, e.user);
-      if (consumed) return;
-    }
-    await handleIncoming(client, {
+    await dispatch(client, {
       channel: e.channel,
       user: e.user,
       text: e.text ?? "",
@@ -71,8 +114,9 @@ export function registerHandlers(app: App) {
   });
 
   app.event("app_mention", async ({ event, client }) => {
+    if (!isAllowedSlackUser(event.user) && !watchdog.allowed(event.user)) return;
     const e = event as typeof event & { files?: SlackFileRef[] };
-    await handleIncoming(client, {
+    await dispatch(client, {
       channel: event.channel,
       user: event.user ?? "unknown",
       text: event.text,
