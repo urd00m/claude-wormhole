@@ -12,7 +12,9 @@ Use `skills/reviewed-handoff.md` to prepare that context.
 3. Write a concise handover from visible history: current task, verified facts with
    observation dates, relevant paths, budgets, permissions, and outstanding errors.
    Exclude private reasoning and automatic replay of tool calls or rejected work.
-4. Review the destination task. Stop on rejection.
+4. Review the destination task independently from the source session's failure.
+   A source-session stop alone does not establish that a separate task is rejected.
+   Do not use replacement identities to retry a rejected destination task.
 5. Initialize a provider-minted replacement using the same workdir, provider home,
    model, and permissions. Load the reviewed handover; perform a read-only recall
    check, then resume that same ID once without resupplying context to verify recall.
