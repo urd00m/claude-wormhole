@@ -99,11 +99,22 @@ You need three Slack values in `.env`. (Claude auth is separate — see the "Cla
 Set `SLACK_ALLOWED_USER_IDS` in `.env` to your Slack member ID (profile → More →
 Copy member ID), for example `SLACK_ALLOWED_USER_IDS=U0123456789`. To allow
 multiple trusted users, separate their IDs with commas. Restart the bot after
-changing this setting. If empty or unset, all incoming messages and approval
-actions are ignored. Unauthorized requests receive no response and cannot start
+changing this setting. If empty or unset, unrestricted access and approval
+actions are disabled. Unauthorized requests receive no response and cannot start
 sessions, invoke commands, or approve or deny pending actions. Outgoing scheduled
 notifications still work, so other channel members can receive reset alerts
 without permission to operate the agent.
+
+This installation also has a separate **restricted-user Docker policy** for
+Jonathan and Misk in `#nala-ugrad`. They must not be added to the unrestricted
+allowlist. Their agents, child workers, and `!` commands execute in one container
+per user with read-only Aires DB access, 3 GiB RAM and 15 GiB writable storage.
+Restricted access is channel-scoped and takes precedence over unrestricted grants;
+an unavailable or incorrectly configured container never falls back to host execution.
+Restricted users do not need an @mention in their approved channel.
+An empty unrestricted allowlist does not disable this separate policy. See
+[`docker/restricted/README.md`](docker/restricted/README.md) for provisioning,
+authentication, resource limits and deployment details.
 
 Channel messages require a direct `@YourBotName` mention on each message,
 including replies in existing threads. Set `SLACK_UNMENTIONED_CHANNEL_IDS` to

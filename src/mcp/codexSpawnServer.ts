@@ -1,3 +1,5 @@
+import { SANDBOX_INSTRUCTION } from "../restricted/policy.js";
+import { restrictedMcpEnvironment } from "../restricted/mcpEnvironment.js";
 // Stdio MCP server that gives a Codex worker a `spawn` tool, so codex
 // sub-agents can launch further agents instead of being one-shot. Codex
 // runs this as a child of `codex exec` (configured via -c mcp_servers,
@@ -125,9 +127,13 @@ export function makeRealRunner(): SpawnWorkerRunner {
   for (const [k, v] of Object.entries(process.env)) if (typeof v === "string") baseEnv[k] = v;
 
   return async ({ prompt, model, effort, runtime }) => {
+    if (process.env.WORMHOLE_WORKER === "1") prompt = SANDBOX_INSTRUCTION + "\n\n" + prompt;
     if ((runtime ?? "codex") === "claude") {
       // Claude leaf worker via print mode; parse JSON .result from stdout.
       const args = buildClaudeSubArgs({ prompt, model });
+      if (process.env.WORMHOLE_WORKER === "1" && process.env.WORMHOLE_BRIDGE_SOCKET) {
+        args.splice(args.length - 1, 0, "--append-system-prompt", SANDBOX_INSTRUCTION, "--mcp-config", JSON.stringify({ mcpServers: { wormhole_bridge: { command: process.execPath, args: [path.resolve(path.dirname(server), "../restricted/bridgeServer.js")], env: { WORMHOLE_BRIDGE_SOCKET: process.env.WORMHOLE_BRIDGE_SOCKET } } } }));
+      }
       return await new Promise<SpawnWorkerResult>((resolve) => {
         const child = spawn(claudeBin, args, { cwd: workdir, env: baseEnv, stdio: ["ignore", "pipe", "pipe"] });
         let stdout = "";
@@ -162,6 +168,9 @@ export function makeRealRunner(): SpawnWorkerRunner {
     });
     const childEnv = { ...baseEnv };
     if (tsx && server) childEnv.WORMHOLE_SPAWN_DEPTH = String(childDepth);
+    if (process.env.WORMHOLE_WORKER === "1" && process.env.WORMHOLE_BRIDGE_SOCKET) {
+      args.splice(args.indexOf("--"), 0, ...restrictedMcpEnvironment("wormhole_spawn"), "-c", `mcp_servers.wormhole_bridge.command=${JSON.stringify(process.execPath)}`, "-c", `mcp_servers.wormhole_bridge.args=[${JSON.stringify(path.resolve(path.dirname(server), "../restricted/bridgeServer.js"))}]`, ...restrictedMcpEnvironment("wormhole_bridge"));
+    }
 
     return await new Promise<SpawnWorkerResult>((resolve) => {
       const child = spawn("codex", args, { cwd: workdir, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });

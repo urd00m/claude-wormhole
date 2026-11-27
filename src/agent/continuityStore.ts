@@ -7,6 +7,7 @@ import type { AgentLaunchConfig } from "./runtime/types.js";
 import { ProviderError, isSafetyStop, stoppedMessage, type ProviderFailure } from "./providerError.js";
 
 export type Binding = {
+  execution?: { kind: "docker"; user: string; container: string; channel: string; thread: string };
   key: string;
   runtime: "claude" | "codex";
   workdir: string;

@@ -1,3 +1,5 @@
+import { drainRestricted } from "./restricted/handler.js";
+import { RESTRICTED_USERS, RESTRICTED_CHANNEL } from "./restricted/policy.js";
 import { app } from "./slack/app.js";
 import { env } from "./config.js";
 import { registerHandlers, setSchedulerForHandlers } from "./slack/handlers.js";
@@ -24,11 +26,12 @@ async function main() {
   continuity.acquireOwner();
   console.log(
     env.SLACK_ALLOWED_USER_IDS.length
-      ? `🔒 Slack requests restricted to: ${env.SLACK_ALLOWED_USER_IDS.join(", ")}`
-      : "🔒 No Slack users allowed; set SLACK_ALLOWED_USER_IDS to enable incoming requests.",
+      ? `🔒 Unrestricted Slack requests allowed for: ${env.SLACK_ALLOWED_USER_IDS.join(", ")}`
+      : "🔒 No unrestricted Slack users allowed; set SLACK_ALLOWED_USER_IDS to enable unrestricted requests.",
   );
+  console.log(`🔒 Docker-only users: ${RESTRICTED_USERS.join(", ")}; channel: ${RESTRICTED_CHANNEL}. Containers must pass profile verification before execution.`);
   const auth = detectAuth();
-  console.log(`💬 Channel replies require @mentions except in: ${env.SLACK_UNMENTIONED_CHANNEL_IDS.join(", ") || "none"}. DMs do not require mentions.`);
+  console.log(`💬 Unrestricted channel replies require @mentions except in: ${env.SLACK_UNMENTIONED_CHANNEL_IDS.join(", ") || "none"}. DMs do not require mentions.`);
   if (auth.kind === "none") {
     console.error(
       "❌ No Claude auth configured.\n" +
@@ -117,6 +120,7 @@ async function main() {
     scheduler?.stopAll();
     try {
       await handlers.waitForIdle();
+      await drainRestricted();
       await drainBackgroundWorkers();
       await getResidentWorkerRegistry().drain();
       await sessions.drain();

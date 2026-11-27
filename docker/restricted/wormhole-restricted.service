@@ -1,0 +1,15 @@
+[Unit]
+Description=Prepare Wormhole restricted-user storage, networks and containers
+After=network-online.target
+Wants=network-online.target
+Before=wormhole.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/alan/claude-wormhole
+ExecStart=/usr/bin/node --import tsx src/restricted/provision.ts
+Environment=HOME=/home/alan
+Environment=WORMHOLE_STATE_DIR=/home/alan/.local/state/claude-wormhole
+TimeoutStartSec=infinity
+RemainAfterExit=yes
+UMask=0077

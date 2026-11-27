@@ -7,7 +7,7 @@ export const configSchema = z.object({
   SLACK_APP_TOKEN: z.string().startsWith("xapp-", "must start with xapp-"),
   SLACK_BOT_TOKEN: z.string().startsWith("xoxb-", "must start with xoxb-"),
   SLACK_SIGNING_SECRET: z.string().min(1),
-  // Empty/unset blocks all incoming users. Outgoing notifications still work.
+  // Empty/unset blocks unrestricted access. Restricted Docker users have a separate channel-scoped policy.
   SLACK_ALLOWED_USER_IDS: z.string().default("").transform((value) =>
     [...new Set(value.split(",").map((id) => id.trim()).filter(Boolean))],
   ).refine((ids) => ids.every((id) => /^U[A-Z0-9]+$/.test(id)), {
@@ -81,22 +81,29 @@ export function parseConfig(raw: Record<string, string | undefined>): z.infer<ty
   return configSchema.parse(raw);
 }
 
-const parsed = configSchema.safeParse(process.env);
-if (!parsed.success) {
-  console.error("❌ Invalid environment:");
-  for (const issue of parsed.error.issues) {
-    console.error(`  ${issue.path.join(".")}: ${issue.message}`);
-  }
-  console.error("\nCopy .env.example to .env and fill in the values.");
+// Container workers validate runtime settings without requiring Slack credentials.
+export const workerConfigSchema = configSchema.omit({ SLACK_APP_TOKEN: true, SLACK_BOT_TOKEN: true, SLACK_SIGNING_SECRET: true, SLACK_ALLOWED_USER_IDS: true, SLACK_UNMENTIONED_CHANNEL_IDS: true });
+function invalidConfig(error: z.ZodError): never {
+  console.error("Invalid environment:");
+  for (const issue of error.issues) console.error(`  ${issue.path.join(".")}: ${issue.message}`);
   process.exit(1);
 }
-
-export const env = parsed.data;
+function loadEnvironment(): z.infer<typeof configSchema> {
+  if (process.env.WORMHOLE_WORKER === "1") {
+    const parsed = workerConfigSchema.safeParse(process.env);
+    if (!parsed.success) invalidConfig(parsed.error);
+    return { ...parsed.data, SLACK_APP_TOKEN: "", SLACK_BOT_TOKEN: "", SLACK_SIGNING_SECRET: "", SLACK_ALLOWED_USER_IDS: [], SLACK_UNMENTIONED_CHANNEL_IDS: [] };
+  }
+  const parsed = configSchema.safeParse(process.env);
+  if (!parsed.success) invalidConfig(parsed.error);
+  return parsed.data;
+}
+export const env = loadEnvironment();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(here, "..");
-export const SESSIONS_DIR = path.join(ROOT_DIR, "sessions");
-export const DATA_DIR = path.join(ROOT_DIR, "data");
+export const SESSIONS_DIR = process.env.WORMHOLE_WORKER === "1" ? "/user/sessions" : path.join(ROOT_DIR, "sessions");
+export const DATA_DIR = process.env.WORMHOLE_WORKER === "1" ? "/user/data" : path.join(ROOT_DIR, "data");
 export const CRONS_FILE = path.join(DATA_DIR, "crons.json");
 export const WORKDIRS_FILE = path.join(DATA_DIR, "workdirs.json");
 export const RUNTIMES_FILE = path.join(DATA_DIR, "runtimes.json");

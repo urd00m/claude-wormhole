@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { workerIdentity } from "./identity.js";
+const identity = { sessionId: "12345678-1234-1234-1234-123456789abc", started: true, workdir: "/user/sessions/example", providerHome: "/user/codex" };
+assert.deepEqual(workerIdentity(identity, "codex"), identity);
+const untrusted = { ...identity, key: "another-conversation", execution: { kind: "host" }, state: "ready", launch: { codexArgs: ["ignored"] } };
+assert.deepEqual(workerIdentity(untrusted, "codex"), identity, "worker-controlled fields must never change host ownership, keys, execution realm or policy");
+assert.deepEqual(workerIdentity({ sessionId: null, started: false, workdir: "/user/new", providerHome: "/user/claude" }, "claude"), { sessionId: null, started: false, workdir: "/user/new", providerHome: "/user/claude" });
+assert.throws(() => workerIdentity({ ...identity, sessionId: null }, "codex"));
+assert.throws(() => workerIdentity({ ...identity, sessionId: "../transcript" }, "codex"));
+assert.throws(() => workerIdentity({ ...identity, providerHome: "/home/alan/.codex" }, "codex"));
+assert.throws(() => workerIdentity(identity, "claude"));
+assert.throws(() => workerIdentity({ ...identity, workdir: "/user/\0invalid" }, "codex"));
+console.log("✅ Worker identity boundary: only provider identity fields accepted; host conversation ownership and execution policy cannot be overwritten");

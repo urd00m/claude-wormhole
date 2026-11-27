@@ -5,6 +5,7 @@ import { RecoveryRequiredError, type Binding } from "./continuityStore.js";
 
 /** Validate an exact identity; never infer one from a shared cwd or --last. */
 export function validateNativeSession(binding: Binding): void {
+  if (binding.execution?.kind === "docker" && process.env.WORMHOLE_WORKER !== "1") throw new RecoveryRequiredError("Container conversation must be validated inside its assigned container.");
   if (!binding.started) return;
   if (!fs.existsSync(binding.workdir) || !fs.statSync(binding.workdir).isDirectory()) throw new RecoveryRequiredError(`Original working directory is missing for ${binding.sessionId}.`);
   if (!binding.sessionId) throw new RecoveryRequiredError("A started conversation has no native session ID.");

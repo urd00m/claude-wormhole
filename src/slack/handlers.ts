@@ -1,3 +1,5 @@
+import { isRestrictedUser, restrictedAccess, restrictedKey } from "../restricted/policy.js";
+import { handleRestricted } from "../restricted/handler.js";
 import type { App } from "@slack/bolt";
 import type { WebClient } from "@slack/web-api";
 import { sessions, threadKeyOf } from "../agent/manager.js";
@@ -59,6 +61,7 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
   // Remember completed posts too, since the second event may arrive later.
   const acceptedMessages = new Map<string, number>();
   async function dispatch(client: WebClient, msg: Common, replayId?: string) {
+    if (isRestrictedUser(msg.user) && !restrictedAccess(msg.user, msg.channel)) return;
     const now = Date.now();
     for (const [key, expires] of acceptedMessages) {
       if (expires > now) break;
@@ -66,7 +69,8 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
     }
     const key = replayId ?? `${msg.channel}:${msg.ts}`;
     if (acceptedMessages.has(key)) return;
-    if (!replayId && !durable.acceptDelivery(key, threadKeyOf(msg.channel, msg.thread_ts ?? msg.ts), msg)) return;
+    const sessionKey = isRestrictedUser(msg.user) ? restrictedKey(msg.user, msg.channel, msg.thread_ts ?? msg.ts) : threadKeyOf(msg.channel, msg.thread_ts ?? msg.ts);
+    if (!replayId && !durable.acceptDelivery(key, sessionKey, msg)) return;
     if (sessions.isDraining) return; // Stored before acknowledging; next process can dispatch it.
     if (!durable.claimDelivery(key)) return;
     activeDispatches++;
@@ -75,6 +79,11 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
     }
     acceptedMessages.set(key, now + 5 * 60_000);
     try {
+      if (isRestrictedUser(msg.user)) {
+        const error = await handleRestricted(client, msg);
+        durable.finishDelivery(key, error);
+        return;
+      }
       const report = parseWatchdogCommand(msg.text);
       if (report) {
         if (!watchdog.allowed(msg.user)) return;
@@ -110,12 +119,12 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
     if (e.subtype && e.subtype !== "file_share") return;
     if (e.bot_id) return;
     if (!e.channel || !e.ts || !e.user) return;
-    if (!isAllowedSlackUser(e.user) && !watchdog.allowed(e.user)) return;
+    if (isRestrictedUser(e.user) ? !restrictedAccess(e.user, e.channel) : !isAllowedSlackUser(e.user) && !watchdog.allowed(e.user)) return;
     // Recognize our exact mention from message events as well, so channels
     // work even when the installed token lacks app_mentions:read.
     const isDirectMessage = e.channel_type === "im" || e.channel_type === "mpim" || e.channel.startsWith("D");
     const mentionsBot = !!context?.botUserId && !!e.text?.includes(`<@${context.botUserId}>`);
-    if (!isDirectMessage && !env.SLACK_UNMENTIONED_CHANNEL_IDS.includes(e.channel) && !mentionsBot) return;
+    if (!isDirectMessage && !restrictedAccess(e.user, e.channel) && !env.SLACK_UNMENTIONED_CHANNEL_IDS.includes(e.channel) && !mentionsBot) return;
     // Allow empty text when files are attached
     if (!e.text && !(e.files && e.files.length > 0)) return;
     await dispatch(client, {
@@ -129,7 +138,7 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
   });
 
   app.event("app_mention", async ({ event, client }) => {
-    if (!isAllowedSlackUser(event.user) && !watchdog.allowed(event.user)) return;
+    if (isRestrictedUser(event.user) ? !restrictedAccess(event.user, event.channel) : !isAllowedSlackUser(event.user) && !watchdog.allowed(event.user)) return;
     const e = event as typeof event & { files?: SlackFileRef[] };
     await dispatch(client, {
       channel: event.channel,
@@ -148,7 +157,7 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
         const binding = durable.get(delivery.thread_key);
         if (binding?.state === "stopped" || binding?.state === "recovery_required") continue;
         const msg = JSON.parse(delivery.payload) as Common;
-        if (!isAllowedSlackUser(msg.user)) continue;
+        if (isRestrictedUser(msg.user) ? !restrictedAccess(msg.user, msg.channel) : !isAllowedSlackUser(msg.user)) continue;
         await dispatch(client, msg, delivery.id);
       }
     },

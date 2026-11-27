@@ -1,4 +1,6 @@
-export const SYSTEM_PROMPT = `You are a Slack-resident Claude agent.
+import { SANDBOX_INSTRUCTION } from "../restricted/policy.js";
+
+const HOST_SYSTEM_PROMPT = `You are a Slack-resident Claude agent.
 
 You converse with users inside Slack threads. Your output is rendered as Slack messages,
 so prefer concise, well-formatted replies. Use code fences for code, and keep prose tight.
@@ -76,3 +78,5 @@ You do NOT have AskUserQuestion in this environment — Slack has no picker UI f
 so the call would return an empty answer and loop. When you need a clarifying answer
 from the user, ask the question inline as plain text in your reply and wait for their
 next message.`;
+
+export const SYSTEM_PROMPT = process.env.WORMHOLE_WORKER === "1" ? SANDBOX_INSTRUCTION : HOST_SYSTEM_PROMPT;

@@ -75,7 +75,7 @@ export const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent
   "general-purpose": {
     description:
       "General-purpose agent with the full Claude Code tool surface (Bash, Read/Write/Edit, Grep/Glob, web tools, AND the Agent/Task spawning tool) so it can run repo Python/Bash tooling, read project files, and recursively spawn further sub-agents (Planner / Plan-critic / Executor / Analyzer / Verifier / Verdict-critic workers) up to a depth cap.",
-    prompt: SUBAGENT_PROMPT,
+    prompt: process.env.WORMHOLE_WORKER === "1" ? SYSTEM_PROMPT + "\n\n" + SUBAGENT_PROMPT : SUBAGENT_PROMPT,
     tools: [...SUBAGENT_TOOLS],
     disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
     permissionMode: "bypassPermissions",
@@ -83,7 +83,7 @@ export const RECURSIVE_AGENTS: Record<string, import("@anthropic-ai/claude-agent
   [BACKGROUND_WORKER_TYPE]: {
     description:
       "Fire-and-forget background worker. Use for long-running tasks (benchmarks, large builds, slow verifiers) where the parent should not wait on the result. The Agent tool returns immediately; completion is reported back into the Slack thread via a task-notification event when the worker finishes. Has the same full tool surface as general-purpose.",
-    prompt: BACKGROUND_WORKER_PROMPT,
+    prompt: process.env.WORMHOLE_WORKER === "1" ? SYSTEM_PROMPT + "\n\n" + BACKGROUND_WORKER_PROMPT : BACKGROUND_WORKER_PROMPT,
     tools: [...SUBAGENT_TOOLS],
     disallowedTools: [...SUBAGENT_DISALLOWED_TOOLS],
     background: true,

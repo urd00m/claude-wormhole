@@ -14,6 +14,10 @@
 export type SessionInput = {
   text: string;
   attachments?: string[];
+  /** Transport-supplied timestamp of the human message authorizing this turn.
+   * Its background wakes inherit it; synthetic work without one cannot resume
+   * a conversation after a cyber rejection. Never inferred from prompt text. */
+  userMessageAt?: number;
 };
 
 /** Reasoning-effort levels accepted by both runtimes (Codex honors the

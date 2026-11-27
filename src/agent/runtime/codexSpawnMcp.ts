@@ -15,6 +15,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { ROOT_DIR } from "../../config.js";
 import { MAX_SUBAGENT_DEPTH } from "../subagentDepth.js";
+import { restrictedMcpEnvironment } from "../../restricted/mcpEnvironment.js";
 
 /** Resolve an absolute `claude` path once, so the spawn server can launch
  * claude leaf workers without depending on PATH inside the codex subprocess.
@@ -32,10 +33,10 @@ let _claudeBin: string | null = null;
 export const CODEX_SPAWN_MCP_NAME = "wormhole_spawn";
 
 function tsxBin(): string {
-  return path.join(ROOT_DIR, "node_modules", ".bin", "tsx");
+  return process.env.WORMHOLE_WORKER === "1" ? process.execPath : path.join(ROOT_DIR, "node_modules", ".bin", "tsx");
 }
 function serverScript(): string {
-  return path.join(ROOT_DIR, "src", "mcp", "codexSpawnServer.ts");
+  return process.env.WORMHOLE_WORKER === "1" ? path.join(ROOT_DIR, "dist", "mcp", "codexSpawnServer.js") : path.join(ROOT_DIR, "src", "mcp", "codexSpawnServer.ts");
 }
 
 /**
@@ -55,6 +56,12 @@ export function codexSpawnMcpFlags(depth: number, workdir: string): { args: stri
       `mcp_servers.${name}.command="${tsx}"`,
       "-c",
       `mcp_servers.${name}.args=["${server}"]`,
+      ...restrictedMcpEnvironment(name),
+      ...(process.env.WORMHOLE_WORKER === "1" && process.env.WORMHOLE_BRIDGE_SOCKET ? [
+        "-c", `mcp_servers.wormhole_bridge.command=${JSON.stringify(process.execPath)}`,
+        "-c", `mcp_servers.wormhole_bridge.args=[${JSON.stringify(path.join(ROOT_DIR, "dist/restricted/bridgeServer.js"))}]`,
+        ...restrictedMcpEnvironment("wormhole_bridge"),
+      ] : []),
     ],
     env: {
       WORMHOLE_SPAWN_DEPTH: String(depth),

@@ -1,3 +1,4 @@
+import { SANDBOX_INSTRUCTION } from "../../restricted/policy.js";
 // Codex implementation of the Runtime port. Wraps the local `codex` CLI
 // (codex-rs v0.133.0+) as a per-thread subprocess.
 //
@@ -123,6 +124,7 @@ function buildCodexEnv(): Record<string, string> {
 
 function buildPrompt(input: SessionInput): string {
   const parts: string[] = [];
+  if (process.env.WORMHOLE_WORKER === "1") parts.push(SANDBOX_INSTRUCTION, "");
   if (input.attachments && input.attachments.length > 0) {
     parts.push("User uploaded files (in ./uploads/):");
     for (const a of input.attachments) parts.push(`- ${a}`);

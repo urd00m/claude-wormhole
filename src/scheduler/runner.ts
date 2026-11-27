@@ -1,3 +1,5 @@
+import { isRestrictedUser, restrictedAccess } from "../restricted/policy.js";
+import { handleRestricted } from "../restricted/handler.js";
 import type { WebClient } from "@slack/web-api";
 import { Heartbeat } from "../slack/heartbeat.js";
 import { SlackStreamer } from "../slack/stream.js";
@@ -18,6 +20,7 @@ import type { Scheduler } from "./scheduler.js";
  */
 export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
   return async (entry: CronEntry) => {
+    if (isRestrictedUser(entry.createdBy) && !restrictedAccess(entry.createdBy, entry.channel)) throw new Error("Restricted schedule channel denied");
     const placeholder = await client.chat.postMessage({
       channel: entry.channel,
       text: `🕒 scheduled run: ${entry.description ?? entry.prompt.slice(0, 80)}`,
@@ -28,6 +31,10 @@ export function makeRunner(client: WebClient, getScheduler: () => Scheduler) {
       return;
     }
 
+    if (isRestrictedUser(entry.createdBy)) {
+      await handleRestricted(client, { user: entry.createdBy, channel: entry.channel, ts, text: entry.prompt, userMessageAt: 0 });
+      return;
+    }
     const threadTs = ts;
     const key = threadKeyOf(entry.channel, threadTs);
     const { entry: sessionEntry } = await sessions.get(key);
