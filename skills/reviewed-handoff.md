@@ -13,15 +13,14 @@ operation covered by `skills/session-handoff.md`.
    task, verified facts with dates, relevant paths, permissions, budgets, and
    unresolved errors. Label historical reports that need a fresh check.
    Exclude private reasoning, credentials, and automatic replay of tool calls.
-4. Review the destination task. Do not carry rejected work forward as instructions
-   or use session replacement to bypass a safety stop. A separate allowed task,
+4. Review the destination task. A separate allowed task,
    such as a read-only status report, must retain that boundary explicitly.
    Stop if the destination task is rejected; do not retry through new identities.
 5. Save the handoff and a report of scope, source identity, backups, hashes,
    verification, and whether any switch occurred. Verify preparation left the
    original binding, transcript, and all session identities unchanged.
 
-For an authorized session move that does not bypass a safety stop, follow
+For an authorized session move, follow
 `skills/session-handoff.md` to validate the replacement and switch the live
 manager and durable binding together. A prepared handoff alone is not a completed
 session move or provider approval to resume rejected work.
