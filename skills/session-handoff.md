@@ -2,6 +2,8 @@
 
 Use for a user-authorized move to a replacement assistant in the same Slack thread.
 Carry reviewed context forward; preserve the original session and restriction records.
+Use `skills/reviewed-handoff.md` to prepare that context. A session move must not
+bypass a safety stop or automatically retry rejected work.
 
 1. Identify the thread key, native session ID, workdir, provider home, launch config,
    and current failure. Confirm the target has no active turn, creation, queued
