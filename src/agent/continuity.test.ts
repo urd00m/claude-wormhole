@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ContinuityStore, type Binding } from "./continuityStore.js";
 import { SessionManager } from "./manager.js";
-import { parseProviderError, isSafetyStop } from "./providerError.js";
+import { parseProviderError, isSafetyStop, ProviderError } from "./providerError.js";
 import { verifyIndexedThreads } from "./startupContinuity.js";
 import { validateNativeSession } from "./nativeSession.js";
 import { DatabaseSync } from "node:sqlite";
@@ -30,6 +30,9 @@ try {
   child(stopped, "block"); child(stopped, "assert-stopped");
   const s = new ContinuityStore(stopped);
   assert.equal(s.get("C123:1.1")?.failure?.details?.review_target, "opaque-target"); s.close();
+  const cyberStopped = path.join(tmp, "cyber-stopped/state.sqlite");
+  child(cyberStopped, "block-cyber"); child(cyberStopped, "assert-stopped-cyber");
+  child(cyberStopped, "cyber-followup"); child(cyberStopped, "assert-stopped-cyber");
   const crashed = path.join(tmp, "crashed/state.sqlite");
   child(crashed, "crash", "codex", 23); child(crashed, "assert-uncertain");
 
@@ -51,27 +54,105 @@ try {
   assert.equal(store.get("C123:rotated")?.state, "closed");
   assert.equal(store.get("C123:rotated")?.inFlight, false, "a retired worker must finish settling before its name is reused");
 
-  let providerCalls = 0;
-  store.put(binding("C123:blocked"));
-  const blockedManager = new SessionManager(store, () => {}, (key, workdir, registry, b) => new CodexRuntime({ threadKey: key, workdir,
-    continuity: { sessionId: b.sessionId, started: b.started, providerHome: b.providerHome, onIdentity: (identity) => { registry.update(key, identity); } },
-    processFactory: () => {
-      providerCalls++;
-      return { lines: () => (async function* () {
-        yield JSON.stringify({ type: "thread.started", thread_id: b.sessionId });
-        yield JSON.stringify({ type: "turn.failed", error: { code: "misalignment_policy_violation", message: "blocked" } });
-      })(), wait: async () => 0, stderr: async () => "", kill: () => {} };
-    },
-  }));
-  const stoppedEntry = (await blockedManager.get("C123:blocked")).entry;
-  const outcomes = await Promise.allSettled([
-    stoppedEntry.enqueue(() => stoppedEntry.session.send({ text: "first" }).then(() => {})),
-    stoppedEntry.enqueue(() => stoppedEntry.session.send({ text: "already queued" }).then(() => {})),
-  ]);
-  assert(outcomes.every((x) => x.status === "rejected"));
-  await assert.rejects(() => stoppedEntry.session.send({ text: "background wake" }));
-  assert.equal(providerCalls, 1, "queued turns and wakes must not call a stopped provider, including exit-zero failures");
-  assert.equal(store.get("C123:blocked")?.state, "stopped");
+  for (const code of ["misalignment_policy_violation", "cyber_policy", "legacy-cyber"]) {
+    let providerCalls = 0;
+    let acceptRevisedRequest = false;
+    const blockedKey = `C123:blocked-${code}`;
+    const diagnostic = code === "legacy-cyber"
+      ? "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request."
+      : "blocked";
+    const expectedCode = code === "legacy-cyber" ? "cyber_policy" : code;
+    store.put(binding(blockedKey));
+    const blockedManager = new SessionManager(store, () => {}, (key, workdir, registry, b) => new CodexRuntime({ threadKey: key, workdir,
+      continuity: { sessionId: b.sessionId, started: b.started, providerHome: b.providerHome, onIdentity: (identity) => { registry.update(key, identity); } },
+      lastMessageFileFactory: () => path.join(tmp, code + "-last.txt"),
+      processFactory: (opts) => {
+        providerCalls++;
+        if (acceptRevisedRequest) {
+          assert(opts.args.includes("resume") && opts.args.includes(blockedKey + "-native"));
+          assert(!opts.args.includes("first"), "a follow-up must not replay the rejected input");
+          fs.writeFileSync(path.join(tmp, code + "-last.txt"), "Revised request accepted");
+        }
+        return { lines: () => (async function* () {
+          yield JSON.stringify({ type: "thread.started", thread_id: b.sessionId });
+          if (acceptRevisedRequest) {
+            yield JSON.stringify({ type: "turn.completed" });
+            return;
+          }
+          // A preceding generic error must not hide the later policy failure.
+          yield JSON.stringify({ type: "error", message: "generic failure" });
+          yield JSON.stringify(code === "legacy-cyber"
+            ? { type: "error", message: diagnostic }
+            : { type: "turn.failed", error: { code, message: diagnostic } });
+          if (code === "misalignment_policy_violation") {
+            yield JSON.stringify({ type: "error", code: "cyber_policy", message: "later cyber error must not hide the terminal stop" });
+          }
+        })(), wait: async () => 0, stderr: async () => "", kill: () => {} };
+      },
+    }));
+    const stoppedEntry = (await blockedManager.get(blockedKey)).entry;
+    const queuedAt = Date.now() - 1;
+    const outcomes = await Promise.allSettled([
+      stoppedEntry.enqueue(() => stoppedEntry.session.send({ text: "first", userMessageAt: queuedAt }).then(() => {})),
+      stoppedEntry.enqueue(() => stoppedEntry.session.send({ text: "already queued", userMessageAt: queuedAt }).then(() => {})),
+    ]);
+    assert(outcomes.every((x) => x.status === "rejected"));
+    for (const outcome of outcomes) {
+      if (outcome.status !== "rejected") continue;
+      assert(outcome.reason instanceof ProviderError);
+      assert.equal(outcome.reason.failure.code, expectedCode);
+      assert.equal(outcome.reason.failure.sessionId, blockedKey + "-native");
+    }
+    await assert.rejects(() => stoppedEntry.session.send({ text: "background wake" }));
+    await assert.rejects(() => stoppedEntry.session.runtime.send({ text: "direct runtime call" }), (error: unknown) => {
+      assert(error instanceof ProviderError);
+      assert.equal(error.failure.code, expectedCode);
+      assert.equal(error.failure.sessionId, blockedKey + "-native");
+      return true;
+    });
+    assert.equal(providerCalls, 1, "queued turns and wakes must not call a stopped provider, including exit-zero failures");
+    assert.equal(store.get(blockedKey)?.state, expectedCode === "cyber_policy" ? "ready" : "stopped");
+    assert.equal(store.get(blockedKey)?.failure?.code, expectedCode);
+    assert.equal(store.get(blockedKey)?.failure?.message, diagnostic);
+    assert.equal(store.get(blockedKey)?.sessionId, blockedKey + "-native");
+    blockedManager.close(blockedKey);
+    const reloaded = (await blockedManager.get(blockedKey)).entry;
+    await assert.rejects(() => reloaded.session.send({ text: "hello" }), (error: unknown) => {
+      assert(error instanceof ProviderError);
+      assert.equal(error.failure.code, expectedCode);
+      assert.equal(error.failure.sessionId, blockedKey + "-native");
+      return true;
+    });
+    assert.equal(providerCalls, 1, "reloading a stopped conversation must not call the provider");
+    if (expectedCode === "cyber_policy") {
+      const rejection = store.get(blockedKey)!.cyberRejection!;
+      acceptRevisedRequest = true;
+      const revisedAt = rejection.occurredAt! + 1;
+      const reply = await reloaded.session.send({ text: "A revised request", userMessageAt: revisedAt });
+      assert.equal(reply.finalText, "Revised request accepted");
+      assert.equal(providerCalls, 2, "a deliberate new message gets exactly one provider call");
+      assert.equal(store.get(blockedKey)?.failure, undefined);
+      await assert.rejects(() => reloaded.session.send({ text: "old queued input", userMessageAt: queuedAt }));
+      await assert.rejects(() => reloaded.session.send({ text: "late wake from rejected turn", userMessageAt: queuedAt }));
+      assert.equal(providerCalls, 2, "successful follow-up must not release stale queued work");
+      await reloaded.session.send({ text: "wake belonging to the revised request", userMessageAt: revisedAt });
+      assert.equal(providerCalls, 3, "background work authorized by the new request can proceed");
+      acceptRevisedRequest = false;
+      await assert.rejects(() => reloaded.session.send({ text: "another new request", userMessageAt: Date.now() + 1000 }));
+      assert.equal(providerCalls, 4, "a second rejection must not start an automatic retry");
+      await assert.rejects(() => reloaded.session.send({ text: "automatic continuation" }));
+      assert.equal(providerCalls, 4);
+      assert.equal(store.get(blockedKey)?.state, "ready", "another cyber rejection still does not terminate the conversation");
+      assert.equal(store.get(blockedKey)?.sessionId, blockedKey + "-native");
+    } else {
+      await assert.rejects(() => reloaded.session.send({ text: "new input", userMessageAt: Date.now() + 1000 }));
+      assert.equal(providerCalls, 1, "a new user message cannot clear a terminal safety stop");
+    }
+  }
+  store.put(binding("C123:transient"));
+  store.beginTurn("C123:transient");
+  store.finishTurn("C123:transient", { code: "server_error", message: "temporary service failure" });
+  assert.equal(store.assertRunnable("C123:transient").sessionId, "C123:transient-native");
   store.put(binding("C123:2.1")); store.put(binding("C123:3.1"));
   const manager = new SessionManager(store, () => {});
   const a = (await manager.get("C123:2.1")).entry;

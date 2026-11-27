@@ -51,7 +51,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { env } from "../../config.js";
-import { ProviderError, parseProviderError, isSafetyStop, stoppedMessage } from "../providerError.js";
+import { ProviderError, parseProviderError, isSafetyStop, isCyberRejection, assertCyberFollowup, stoppedMessage } from "../providerError.js";
 import type {
   AgentLaunchConfig,
   Runtime,
@@ -292,6 +292,7 @@ export class CodexRuntime implements Runtime {
   private identityRevision = 0;
   private readonly continuity?: import("./types.js").RuntimeContinuity;
   private stoppedFailure: import("../providerError.js").ProviderFailure | null = null;
+  private cyberRejection: import("../providerError.js").ProviderFailure | null = null;
   private readonly launch?: AgentLaunchConfig;
   private readonly enableSpawnMcp: boolean;
   private readonly spawnDepth: number;
@@ -331,6 +332,7 @@ export class CodexRuntime implements Runtime {
     this.sessionId = null;
     this.identityRevision++;
     this.stoppedFailure = null;
+    this.cyberRejection = null;
     this.saveIdentity(false);
   }
 
@@ -338,6 +340,7 @@ export class CodexRuntime implements Runtime {
     this.sessionId = null;
     this.identityRevision++;
     this.stoppedFailure = null;
+    this.cyberRejection = null;
     this.saveIdentity(false);
   }
 
@@ -362,7 +365,8 @@ export class CodexRuntime implements Runtime {
   }
 
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
-    if (this.stoppedFailure) throw new ProviderError({ ...this.stoppedFailure, message: stoppedMessage(this.sessionId, this.stoppedFailure) });
+    if (this.stoppedFailure) throw new ProviderError({ ...this.stoppedFailure, sessionId: this.sessionId, message: stoppedMessage(this.sessionId, this.stoppedFailure) });
+    assertCyberFollowup(this.cyberRejection, input.userMessageAt);
     const lastMessageFile = this.lastMessageFileFactory();
     let prompt = buildPrompt(input);
 
@@ -440,7 +444,7 @@ export class CodexRuntime implements Runtime {
           }
         }
         const failure = parseProviderError(ev);
-        if (failure && (!observedFailure || isSafetyStop(failure))) observedFailure = failure;
+        if (failure && (!observedFailure || isSafetyStop(failure) || (isCyberRejection(failure) && !isSafetyStop(observedFailure)))) observedFailure = failure;
         if ((ev as { type?: string } | null)?.type === "turn.failed") sawTurnFailed = true;
         const errMsg = extractErrorMessage(ev);
         if (errMsg !== null && observedErrorMessage === null) {
@@ -450,10 +454,12 @@ export class CodexRuntime implements Runtime {
       }
 
       const exitCode = await proc.wait();
-      if (exitCode !== 0 || sawTurnFailed || (observedFailure && isSafetyStop(observedFailure))) {
-        if (observedFailure && isSafetyStop(observedFailure)) {
-          this.stoppedFailure = observedFailure;
-          throw new ProviderError({ ...observedFailure, sessionId: this.sessionId });
+      if (exitCode !== 0 || sawTurnFailed || (observedFailure && (isSafetyStop(observedFailure) || isCyberRejection(observedFailure)))) {
+        if (observedFailure && (isSafetyStop(observedFailure) || isCyberRejection(observedFailure))) {
+          const rejection = { ...observedFailure, sessionId: this.sessionId, occurredAt: Date.now() };
+          if (isSafetyStop(rejection)) this.stoppedFailure = rejection;
+          else this.cyberRejection = rejection;
+          throw new ProviderError(rejection);
         }
         // User-requested stop (interrupt() killed the process): settle
         // gracefully with a marker instead of throwing, so Slack shows a

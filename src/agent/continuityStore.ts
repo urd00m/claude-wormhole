@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import type { AgentLaunchConfig } from "./runtime/types.js";
-import { ProviderError, isSafetyStop, stoppedMessage, type ProviderFailure } from "./providerError.js";
+import { ProviderError, isSafetyStop, isCyberRejection, assertCyberFollowup, stoppedMessage, type ProviderFailure } from "./providerError.js";
 
 export type Binding = {
   execution?: { kind: "docker"; user: string; container: string; channel: string; thread: string };
@@ -17,6 +17,8 @@ export type Binding = {
   launch?: AgentLaunchConfig;
   state: "ready" | "stopped" | "recovery_required" | "closed";
   failure?: ProviderFailure;
+  /** Retained after success so stale queued work cannot revive a rejected turn. */
+  cyberRejection?: ProviderFailure;
   inFlight?: boolean;
   identityRotated?: boolean;
   ownerThread?: string;
@@ -98,17 +100,18 @@ export class ContinuityStore {
     });
   }
 
-  assertRunnable(key: string): Binding {
+  assertRunnable(key: string, userMessageAt?: number): Binding {
     const b = this.get(key);
     if (!b || b.state === "closed") throw new RecoveryRequiredError(`Conversation ${key} has no active binding.`);
-    if (b.state === "stopped") throw new ProviderError({ ...b.failure, code: "misalignment_policy_violation", message: stoppedMessage(b.sessionId, b.failure) });
+    if (b.state === "stopped") throw new ProviderError({ ...b.failure, code: b.failure?.code ?? "misalignment_policy_violation", sessionId: b.sessionId, message: stoppedMessage(b.sessionId, b.failure) });
     if (b.state === "recovery_required") throw new RecoveryRequiredError(`Conversation ${b.sessionId ?? key} needs recovery: ${b.failure?.message ?? "its previous turn is uncertain"}. No replacement conversation was created.`);
+    assertCyberFollowup(b.cyberRejection ?? b.failure, userMessageAt);
     return b;
   }
 
-  beginTurn(key: string): void {
+  beginTurn(key: string, userMessageAt?: number): void {
     this.transaction(() => {
-      const b = this.assertRunnable(key);
+      const b = this.assertRunnable(key, userMessageAt);
       if (b.inFlight) throw new RecoveryRequiredError(`Conversation ${key} already has a turn in progress.`);
       this.update(key, { inFlight: true });
     });
@@ -127,6 +130,7 @@ export class ContinuityStore {
         identityRotated: false,
         state: failure && isSafetyStop(failure) ? "stopped" : b.state === "recovery_required" || uncertain || failure?.code === "native_session_missing" || failure?.code === "conversation_identity_mismatch" ? "recovery_required" : "ready",
         failure: failure ?? (uncertain ? { message: "The provider did not confirm a usable conversation identity." } : undefined),
+        ...(failure && isCyberRejection(failure) ? { cyberRejection: { ...failure, occurredAt: failure.occurredAt ?? Date.now() } } : {}),
       });
     });
   }

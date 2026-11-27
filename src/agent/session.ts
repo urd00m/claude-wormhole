@@ -151,7 +151,7 @@ export class Session {
   async send(input: SessionInput, hooks: StreamHooks = {}): Promise<SessionOutput> {
     if (this._active) throw new Error("A turn is already active in this conversation.");
     const c = this.continuity;
-    c?.store.beginTurn(c.key);
+    c?.store.beginTurn(c.key, input.userMessageAt);
     this._active = true;
     let failure: import("./providerError.js").ProviderFailure | undefined;
     try {

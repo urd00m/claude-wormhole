@@ -1,6 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { toMrkdwn } from "./formatter.js";
-import { ProviderError, isSafetyStop, stoppedMessage } from "../agent/providerError.js";
+import { ProviderError, isSafetyStop, isCyberRejection, cyberRejectionMessage, stoppedMessage } from "../agent/providerError.js";
 
 const MIN_EDIT_INTERVAL_MS = 1000;
 const PLACEHOLDER = "_thinking…_";
@@ -137,7 +137,9 @@ export class SlackStreamer {
     this.closed = true;
     if (this.pendingTimer) clearTimeout(this.pendingTimer);
     if (this.messageTsList.length === 0) return;
-    const msg = err instanceof ProviderError && isSafetyStop(err.failure)
+    const msg = err instanceof ProviderError && isCyberRejection(err.failure)
+      ? cyberRejectionMessage(err.failure.sessionId ?? null, err.failure)
+      : err instanceof ProviderError && isSafetyStop(err.failure)
       ? (err.message.startsWith("This conversation is stopped") ? err.message : stoppedMessage(err.failure.sessionId ?? null, err.failure))
       : err instanceof Error ? err.message : String(err);
     // Split the error text the same way normal output is split — stack

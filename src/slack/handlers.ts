@@ -101,8 +101,8 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
         const consentText = msg.text.replace(/^\s*<@[^>]+>\s*/, "");
         if (await tryResolveByReply(client, msg.channel, msg.thread_ts, consentText, msg.user)) return;
       }
-      await handleIncoming(client, msg);
-      durable.finishDelivery(key);
+      const deliveryError = await handleIncoming(client, msg);
+      durable.finishDelivery(key, deliveryError);
     } catch (error) {
       acceptedMessages.delete(key);
       durable.finishDelivery(key, error instanceof Error ? error.message : String(error));
@@ -166,7 +166,7 @@ export function registerHandlers(app: App, watchdog: WatchdogRoute = watchdogRou
 
 const inFlight = new Set<string>();
 
-async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
+async function handleIncoming(client: WebClient, msg: Common): Promise<string | undefined> {
   const dedupeKey = `${msg.channel}:${msg.ts}`;
   if (inFlight.has(dedupeKey)) return;
   inFlight.add(dedupeKey);
@@ -404,6 +404,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
     void markActive(client, msg.channel, replyThreadTs);
   }
 
+  let deliveryError: string | undefined;
   await entry.enqueue(async () => {
     const heartbeat = new Heartbeat({ client, channel: msg.channel, ts: msg.ts });
     await heartbeat.start();
@@ -475,14 +476,20 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
         const durable = getContinuityStore();
         const id = `wake:${key}:${createHash("sha256").update(prompt).digest("hex")}`;
         if (!durable.acceptDelivery(id, key, { ...msg, text: prompt, files: undefined })) return;
-        if (sessions.isDraining || durable.get(key)?.state !== "ready") return;
+        if (sessions.isDraining) return;
+        try {
+          durable.assertRunnable(key, Number(msg.ts) * 1000);
+        } catch (error) {
+          if (durable.claimDelivery(id)) durable.finishDelivery(id, error instanceof Error ? error.message : String(error));
+          return;
+        }
         if (!durable.claimDelivery(id)) return;
         await entry.enqueue(async () => {
           const wakeStreamer = new SlackStreamer(client, msg.channel, replyThreadTs);
           await wakeStreamer.open();
           try {
             await entry.session.send(
-              { text: prompt },
+              { text: prompt, userMessageAt: Number(msg.ts) * 1000 },
               {
                 onText: (chunk) => wakeStreamer.appendText(chunk),
                 onToolStart: (id, name) => wakeStreamer.toolStart(id, name),
@@ -492,11 +499,11 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
               },
             );
             durable.finishDelivery(id);
+            await wakeStreamer.finalize();
           } catch (error) {
             durable.finishDelivery(id, error instanceof Error ? error.message : String(error));
+            await wakeStreamer.fail(error);
             throw error;
-          } finally {
-            await wakeStreamer.finalize();
           }
         });
       };
@@ -504,7 +511,7 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       wakePoster = withCompletionWake(taskEventPoster, entry.session, runWakeTurn);
 
       await entry.session.send(
-        { text: msg.text, attachments },
+        { text: msg.text, attachments, userMessageAt: Number(msg.ts) * 1000 },
         {
           onText: (chunk) => streamer.appendText(chunk),
           onToolStart: (id, name) => streamer.toolStart(id, name),
@@ -548,10 +555,12 @@ async function handleIncoming(client: WebClient, msg: Common): Promise<void> {
       await streamer.finalize();
     } catch (err) {
       outcome = "error";
+      deliveryError = err instanceof Error ? err.message : String(err);
       await streamer.fail(err);
     } finally {
       await heartbeat.stop(outcome);
       inFlight.delete(dedupeKey);
     }
   });
+  return deliveryError;
 }
